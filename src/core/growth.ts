@@ -62,6 +62,9 @@ export function simulateGrowth(
   if (!planting.plantedOn) {
     return { plant, planting, progress: 0, stage: 'planned', warnings, series };
   }
+  if (planting.removedOn && planting.removedOn <= opts.today) {
+    return { plant, planting, progress: 1, stage: 'done', warnings, series };
+  }
   const start = parseIso(planting.plantedOn);
   let progress = planting.method === 'transplant' ? 0.12 * plant.daysToMaturity : 0;
   const endFrac = 1 + plant.harvestDays / plant.daysToMaturity;

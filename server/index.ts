@@ -3,18 +3,20 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { readFile, stat } from 'node:fs/promises';
 import { join, extname, normalize } from 'node:path';
 import type { Garden } from '../src/core/types.ts';
-import { sampleGarden } from '../src/core/defaults.ts';
+import { migrateGarden, sampleGarden } from '../src/core/defaults.ts';
 import { readJson, writeJson } from './store.ts';
 import { loadHaConfig, saveHaConfig, haStatus, getStates, history, readNumber } from './ha.ts';
-import { getForecast, getArchive } from './weather.ts';
+import { getForecast, getArchive, getSeasonWeather } from './weather.ts';
+import { initAgenda, notifyStatus, sendDigestNow, computeAgenda } from './agenda.ts';
 import { initIrrigation, irrigationState, startRun, stopRun, logManual, evaluate } from './irrigation.ts';
 
 const PORT = Number(process.env.PORT ?? 8787);
 const DIST = join(process.cwd(), 'dist');
 
-let garden: Garden = await readJson<Garden>('garden.json', sampleGarden());
+let garden: Garden = migrateGarden(await readJson<Garden>('garden.json', sampleGarden()));
 await loadHaConfig();
 await initIrrigation(() => garden);
+await initAgenda(() => garden);
 
 type Handler = (req: IncomingMessage, url: URL, params: string[]) => Promise<unknown>;
 const routes: [string, RegExp, Handler][] = [];
@@ -26,7 +28,7 @@ async function body(req: IncomingMessage): Promise<any> {
   let size = 0;
   for await (const c of req) {
     size += c.length;
-    if (size > 5_000_000) throw Object.assign(new Error('Body too large'), { status: 413 });
+    if (size > 25_000_000) throw Object.assign(new Error('Body too large'), { status: 413 });
     chunks.push(c);
   }
   return chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
@@ -43,12 +45,16 @@ route('GET', '/api/garden', async () => garden);
 route('PUT', '/api/garden', async (req) => {
   const g = await body(req);
   if (g?.version !== 1 || !g.site || !Array.isArray(g.beds)) throw Object.assign(new Error('Invalid garden'), { status: 400 });
-  garden = { ...g, updatedAt: new Date().toISOString() };
+  garden = { ...migrateGarden(g), updatedAt: new Date().toISOString() };
   await writeJson('garden.json', garden);
   return { ok: true, updatedAt: garden.updatedAt };
 });
 
 route('GET', '/api/weather', async (_r, u) => getForecast(num(u, 'lat'), num(u, 'lon')));
+route('GET', '/api/season-weather', async (_r, u) => getSeasonWeather(num(u, 'lat'), num(u, 'lon')));
+route('GET', '/api/agenda', async () => computeAgenda());
+route('GET', '/api/notify/status', async () => notifyStatus());
+route('POST', '/api/notify/test', async () => sendDigestNow());
 route('GET', '/api/archive', async (_r, u) => {
   const start = u.searchParams.get('start') ?? '';
   const end = u.searchParams.get('end') ?? '';

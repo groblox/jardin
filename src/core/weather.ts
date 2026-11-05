@@ -28,16 +28,51 @@ function parseDaily(json: any, today: string): DailyWeather[] {
 }
 
 export async function fetchForecast(lat: number, lon: number, fetchFn: Fetch = fetch as any, pastDays = 30): Promise<WeatherBundle> {
-  const url = `${FORECAST}?latitude=${lat}&longitude=${lon}&daily=${DAILY}&past_days=${pastDays}&forecast_days=16&timezone=auto`;
+  const url = `${FORECAST}?latitude=${lat}&longitude=${lon}&daily=${DAILY}&hourly=temperature_2m,relative_humidity_2m,precipitation&past_days=${pastDays}&forecast_days=16&timezone=auto`;
   const res = await fetchFn(url);
   const json = await res.json();
   if (!res.ok) throw new Error(json?.reason ?? `Weather request failed (${res.status})`);
   const offset = json.utc_offset_seconds ?? 0;
   const today = new Date(Date.now() + offset * 1000).toISOString().slice(0, 10);
+  const hr = json.hourly;
+  const hourly = hr?.time
+    ? { time: hr.time as string[], tempC: hr.temperature_2m as number[], rh: hr.relative_humidity_2m as number[], precipMm: hr.precipitation as number[] }
+    : undefined;
   return {
     lat, lon, timezone: json.timezone ?? 'UTC', utcOffsetSeconds: offset, today,
-    daily: parseDaily(json, today), fetchedAt: new Date().toISOString(),
+    daily: parseDaily(json, today), hourly, fetchedAt: new Date().toISOString(),
   };
+}
+
+export interface SeasonWeather {
+  /** Observed daily weather from the biofix (Jan 1, or Jul 1 south of the equator) through today, then forecast. */
+  days: DailyWeather[];
+  /** Last year's weather for the same span — stands in for "normal" beyond the forecast. */
+  normals: DailyWeather[];
+  biofix: string;
+  today: string;
+}
+
+/** Year-to-date + forecast daily weather (for degree-day pest models). */
+export async function fetchSeasonWeather(lat: number, lon: number, forecast: WeatherBundle, fetchFn: Fetch = fetch as any): Promise<SeasonWeather> {
+  const today = forecast.today;
+  const y = +today.slice(0, 4);
+  const south = lat < 0;
+  let biofix = south ? `${today.slice(5) >= '07-01' ? y : y - 1}-07-01` : `${y}-01-01`;
+  const archiveEnd = isoDate(addDays(parseIso(today), -6));
+  const first = forecast.daily[0]?.date ?? today;
+  const observed = archiveEnd >= biofix ? await fetchArchive(lat, lon, biofix, archiveEnd < first ? archiveEnd : isoDate(addDays(parseIso(first), -1)), fetchFn) : [];
+  const days = [...observed.filter((d) => d.date < first), ...forecast.daily].filter((d) => d.date >= biofix);
+  const ly = (d: string) => `${+d.slice(0, 4) - 1}${d.slice(4)}`;
+  const nEnd = isoDate(addDays(parseIso(ly(biofix)), 364));
+  let normals: DailyWeather[] = [];
+  try {
+    normals = await fetchArchive(lat, lon, ly(biofix), nEnd < archiveEnd ? nEnd : archiveEnd, fetchFn);
+  } catch {
+    /* projection falls back to the last known day */
+  }
+  biofix = biofix.slice(0, 10);
+  return { days, normals, biofix, today };
 }
 
 export async function fetchArchive(lat: number, lon: number, start: string, end: string, fetchFn: Fetch = fetch as any): Promise<DailyWeather[]> {

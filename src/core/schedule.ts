@@ -1,7 +1,7 @@
 // Planting calendar from frost dates, maintenance task list, and "what can I plant now".
-import type { Garden, Site } from './types.ts';
-import { PLANTS, PLANT_BY_ID, type PlantType } from './plants.ts';
-import { addDays, isoDate, monthDay, parseIso } from './util.ts';
+import type { Site } from './types.ts';
+import { PLANTS, type PlantType } from './plants.ts';
+import { addDays, monthDay } from './util.ts';
 
 export interface Season {
   year: number;
@@ -51,59 +51,6 @@ export function plantTimeline(plant: PlantType, season: Season): Timeline {
   const start = addDays(sow, Math.round(plant.daysToMaturity * offset));
   t.harvest = [start, addDays(start, plant.harvestDays)];
   return t;
-}
-
-export type TaskKind = 'start-indoors' | 'harden-off' | 'transplant' | 'direct-sow' | 'succession' | 'harvest' | 'fall-sow';
-
-export interface Task {
-  date: string;
-  endDate?: string;
-  kind: TaskKind;
-  title: string;
-  bedId?: string;
-  plantingId?: string;
-  plantId: string;
-}
-
-export function gardenTasks(garden: Garden, year: number): Task[] {
-  const season = seasonFor(garden.site, year);
-  const tasks: Task[] = [];
-  for (const bed of garden.beds) {
-    const seenPlant = new Set<string>();
-    for (const pl of bed.plantings) {
-      const plant = PLANT_BY_ID[pl.plantId];
-      if (!plant) continue;
-      const base = { bedId: bed.id, plantingId: pl.id, plantId: plant.id };
-      const where = ` in ${bed.name}`;
-      if (pl.plantedOn) {
-        const planted = parseIso(pl.plantedOn);
-        const offset = pl.method === 'transplant' ? 0.88 : 1;
-        const h0 = addDays(planted, Math.round(plant.daysToMaturity * offset));
-        tasks.push({ ...base, kind: 'harvest', date: isoDate(h0), endDate: isoDate(addDays(h0, plant.harvestDays)), title: `Harvest ${plant.name}${where}` });
-        if (plant.successionDays && !seenPlant.has(plant.id)) {
-          tasks.push({ ...base, kind: 'succession', date: isoDate(addDays(planted, plant.successionDays)), title: `Succession-sow ${plant.name}${where}` });
-        }
-        seenPlant.add(plant.id);
-        continue;
-      }
-      if (seenPlant.has(plant.id)) continue; // one set of tasks per crop per bed
-      seenPlant.add(plant.id);
-      const t = plantTimeline(plant, season);
-      if (pl.method === 'transplant' && t.transplant) {
-        if (t.startIndoors) tasks.push({ ...base, kind: 'start-indoors', date: isoDate(t.startIndoors), title: `Start ${plant.name} seeds indoors` });
-        if (t.hardenOff) tasks.push({ ...base, kind: 'harden-off', date: isoDate(t.hardenOff), title: `Harden off ${plant.name} seedlings` });
-        tasks.push({ ...base, kind: 'transplant', date: isoDate(t.transplant), title: `Transplant ${plant.name}${where}` });
-      } else if (t.directSow) {
-        tasks.push({ ...base, kind: 'direct-sow', date: isoDate(t.directSow[0]), endDate: isoDate(t.directSow[1]), title: `Sow ${plant.name}${where}` });
-      } else if (t.fallSow) {
-        tasks.push({ ...base, kind: 'fall-sow', date: isoDate(t.fallSow), title: `Plant ${plant.name}${where} (fall)` });
-      } else if (t.transplant) {
-        tasks.push({ ...base, kind: 'transplant', date: isoDate(t.transplant), title: `Plant ${plant.name}${where}` });
-      }
-      tasks.push({ ...base, kind: 'harvest', date: isoDate(t.harvest[0]), endDate: isoDate(t.harvest[1]), title: `Harvest ${plant.name}${where}` });
-    }
-  }
-  return tasks.sort((a, b) => a.date.localeCompare(b.date));
 }
 
 export interface PlantNow {

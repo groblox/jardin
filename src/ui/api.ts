@@ -1,5 +1,5 @@
 import type { Garden, IrrigationEvent, WeatherBundle, DailyWeather } from '../core/types.ts';
-import { fetchForecast, fetchArchive } from '../core/weather.ts';
+import { fetchForecast, fetchArchive, fetchSeasonWeather, type SeasonWeather } from '../core/weather.ts';
 
 const apiUrl = (p: string) => new URL('api/' + p, document.baseURI).toString();
 
@@ -82,6 +82,11 @@ export const api = {
   archive(server: boolean, lat: number, lon: number, start: string, end: string): Promise<DailyWeather[]> {
     return server ? j(`archive?lat=${lat}&lon=${lon}&start=${start}&end=${end}`) : fetchArchive(lat, lon, start, end);
   },
+  async seasonWeather(server: boolean, lat: number, lon: number, forecast: WeatherBundle): Promise<SeasonWeather> {
+    return server ? j(`season-weather?lat=${lat}&lon=${lon}`) : fetchSeasonWeather(lat, lon, forecast);
+  },
+  notifyStatus: () => j<{ lastDigest?: string; lastFrost?: string; lastPublish?: string; lastError?: string; mode: string; sent: { at: string; title: string; message: string }[] }>('notify/status'),
+  notifyTest: () => j<{ title: string; message: string }>('notify/test', { method: 'POST' }),
   haStatus: () => j<HaStatus>('ha/status'),
   haConfig: (url: string, token: string) => j<HaStatus>('ha/config', { method: 'PUT', body: JSON.stringify({ url, token }) }),
   entities: () => j<HaEntityLite[]>('ha/entities'),

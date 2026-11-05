@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useGarden } from '../store.tsx';
 import { api } from '../api.ts';
 import { simulateSeason, type SeasonSim } from '../../core/simulate.ts';
+import { planningYear } from '../../core/schedule.ts';
 import { PLANT_BY_ID } from '../../core/plants.ts';
 import { addDays, fmtDate, isoDate } from '../../core/util.ts';
 import { Chart, Stat } from '../components/Chart.tsx';
@@ -25,7 +26,7 @@ export function SimulateView() {
       const latest = isoDate(addDays(new Date(), -7)); // the archive lags a few days
       const wanted = `${year + 1}-06-30`;
       const days = await api.archive(server, garden.site.lat, garden.site.lon, `${year}-01-01`, wanted < latest ? wanted : latest);
-      setResult(simulateSeason(garden, bed, days, year));
+      setResult(simulateSeason(garden, bed, days, year, planningYear(garden.site, new Date())));
     } catch (e: any) {
       setErr(e.message);
     } finally {
@@ -39,7 +40,7 @@ export function SimulateView() {
     <div className="view">
       <section className="card">
         <h2>Season simulation</h2>
-        <p className="muted">Replays a real past year of weather at your location against a bed’s plan: when each crop would be ready, how often it would have been hit by frost or heat, and how much irrigation it would have needed. Planned crops are “planted” on their ideal date for your frost dates.</p>
+        <p className="muted">Replays a real past year of weather at your location against a bed’s {planningYear(garden.site, new Date())} plan (including successions): when each crop would be ready, how often it would have been hit by frost or heat, and how much irrigation it would have needed.</p>
         <div className="row gap wrap">
           <label className="row gap">Bed
             <select value={bed.id} onChange={(e) => { setSelectedBedId(e.target.value); setResult(null); }}>

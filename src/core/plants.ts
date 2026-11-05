@@ -43,9 +43,20 @@ export interface PlantType {
   companions: string[];
   avoid: string[];
   notes?: string;
+  /** Nutrient demand; legumes fix their own nitrogen. */
+  feeder: Feeder;
+  /** Preferred soil pH range. */
+  ph: [number, number];
+  /** Typical harvest per square foot occupied, lb (home-garden, SFG spacing). */
+  yieldLbPerSqFt: number;
+  /** Stays in the bed year to year until removed. */
+  perennial?: boolean;
 }
 
-const p = (x: PlantType) => x;
+export type Feeder = 'heavy' | 'medium' | 'light' | 'fixer';
+
+type BaseFields = Omit<PlantType, 'feeder' | 'ph' | 'yieldLbPerSqFt' | 'perennial'>;
+const p = (x: BaseFields) => x as PlantType;
 
 export const PLANTS: PlantType[] = [
   p({ id: 'tomato', name: 'Tomato', icon: '🍅', family: 'Solanaceae', perSquare: 1, span: 1, sun: 'full', minSunHours: 6, idealSunHours: 8, season: 'warm', frost: 'tender', daysToMaturity: 70, harvestDays: 60, startIndoorsWeeks: 7, transplantWeeks: 2, baseTempC: 10, optTempC: 25, maxTempC: 35, kc: [0.6, 1.15, 0.8], rootDepthIn: 24, heightFt: 5, companions: ['basil', 'carrot', 'marigold', 'onion', 'parsley', 'lettuce'], avoid: ['potato', 'fennel', 'corn', 'cabbage', 'broccoli'], notes: 'Indeterminate varieties need a trellis; place on the north side of the bed.' }),
@@ -90,6 +101,45 @@ export const PLANTS: PlantType[] = [
   p({ id: 'nasturtium', name: 'Nasturtium', icon: '🌺', family: 'Tropaeolaceae', perSquare: 1, span: 1, sun: 'full', minSunHours: 6, idealSunHours: 8, season: 'warm', frost: 'tender', daysToMaturity: 50, harvestDays: 90, directSow: [1, 6], baseTempC: 10, optTempC: 22, maxTempC: 32, kc: [0.6, 0.9, 0.8], rootDepthIn: 10, heightFt: 1, companions: ['cucumber', 'squash', 'zucchini', 'winter-squash', 'tomato', 'melon'], avoid: [], notes: 'Trap crop for aphids.' }),
   p({ id: 'sunflower', name: 'Sunflower', icon: '🌻', family: 'Asteraceae', perSquare: 1, span: 1, sun: 'full', minSunHours: 8, idealSunHours: 10, season: 'warm', frost: 'tender', daysToMaturity: 80, harvestDays: 21, directSow: [1, 6], baseTempC: 8, optTempC: 25, maxTempC: 35, kc: [0.35, 1.1, 0.35], rootDepthIn: 30, heightFt: 8, companions: ['cucumber', 'corn'], avoid: ['potato', 'pole-bean'], notes: 'Very tall — will shade neighbours to the north.' }),
 ];
+
+// feeder, pH range, yield (lb/sq ft), perennial
+const EXTRA: Record<string, [Feeder, number, number, number, boolean?]> = {
+  tomato: ['heavy', 6.0, 6.8, 6], 'cherry-tomato': ['heavy', 6.0, 6.8, 5], pepper: ['heavy', 6.0, 6.8, 2],
+  eggplant: ['heavy', 5.5, 6.8, 3], potato: ['heavy', 5.0, 6.5, 2.5], lettuce: ['medium', 6.0, 7.0, 2],
+  'leaf-lettuce': ['medium', 6.0, 7.0, 1], spinach: ['medium', 6.5, 7.5, 0.6], kale: ['heavy', 6.0, 7.5, 1.5],
+  chard: ['medium', 6.0, 7.5, 2], broccoli: ['heavy', 6.0, 7.0, 0.75], cabbage: ['heavy', 6.0, 7.5, 3],
+  cauliflower: ['heavy', 6.0, 7.0, 1.5], carrot: ['light', 6.0, 7.0, 1.5], beet: ['medium', 6.0, 7.5, 1.5],
+  radish: ['light', 6.0, 7.0, 0.75], turnip: ['light', 6.0, 7.5, 2], onion: ['medium', 6.0, 7.0, 2.5],
+  scallion: ['light', 6.0, 7.0, 1], garlic: ['medium', 6.0, 7.0, 1], leek: ['heavy', 6.0, 7.5, 2],
+  pea: ['fixer', 6.0, 7.5, 0.5], bean: ['fixer', 6.0, 7.0, 1], 'pole-bean': ['fixer', 6.0, 7.0, 1.5],
+  cucumber: ['heavy', 5.8, 7.0, 4], zucchini: ['heavy', 6.0, 7.0, 2], 'winter-squash': ['heavy', 6.0, 7.0, 1.5],
+  melon: ['heavy', 6.0, 7.0, 3], corn: ['heavy', 5.8, 7.0, 0.6], basil: ['medium', 6.0, 7.5, 0.5],
+  parsley: ['light', 6.0, 7.0, 0.5], cilantro: ['light', 6.2, 6.8, 0.3], dill: ['light', 5.8, 7.0, 0.2],
+  chive: ['light', 6.0, 7.0, 0.3, true], mint: ['light', 6.0, 7.0, 0.5, true], thyme: ['light', 6.0, 8.0, 0.2, true],
+  sage: ['light', 6.0, 7.0, 0.2, true], strawberry: ['medium', 5.5, 6.8, 0.5, true], marigold: ['light', 6.0, 7.0, 0],
+  nasturtium: ['light', 6.0, 7.5, 0.1], sunflower: ['medium', 6.0, 7.5, 0.2],
+};
+for (const pl of PLANTS) {
+  const e = EXTRA[pl.id];
+  if (!e) throw new Error(`Missing plant extras for ${pl.id}`);
+  pl.feeder = e[0];
+  pl.ph = [e[1], e[2]];
+  pl.yieldLbPerSqFt = e[3];
+  if (e[4]) pl.perennial = true;
+}
+
+/** Years to wait before growing the same family in the same spot (soil-borne disease & pest build-up). */
+export const ROTATION_YEARS: Record<string, number> = {
+  Solanaceae: 3,
+  Brassicaceae: 3,
+  Cucurbitaceae: 2,
+  Amaryllidaceae: 3,
+  Fabaceae: 2,
+  Apiaceae: 2,
+  Amaranthaceae: 2,
+  Asteraceae: 1,
+  Poaceae: 1,
+};
 
 export const PLANT_BY_ID: Record<string, PlantType> = Object.fromEntries(PLANTS.map((x) => [x.id, x]));
 

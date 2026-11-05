@@ -1,8 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { simulateWater, recommend, tawMm, minutesForDepth, depthForMinutes, sensorToFraction } from '../src/core/water.ts';
 import { simulateGrowth, developmentRate } from '../src/core/growth.ts';
-import { gardenTasks, plantNow, planningYear, seasonFor } from '../src/core/schedule.ts';
-import { bedWarnings, canPlace } from '../src/core/bed.ts';
+import { plantNow, planningYear, seasonFor } from '../src/core/schedule.ts';
+import { gardenTasks } from '../src/core/tasks.ts';
+import { bedWarnings } from '../src/core/bed.ts';
+import { scheduleSlot } from '../src/core/succession.ts';
 import { estimateFrostDates } from '../src/core/weather.ts';
 import { newBed, sampleGarden } from '../src/core/defaults.ts';
 import { getPlant } from '../src/core/plants.ts';
@@ -17,7 +19,7 @@ function weather(start: string, n: number, f: (i: number) => Partial<DailyWeathe
 }
 
 describe('water balance', () => {
-  const plantings = Array.from({ length: 32 }, (_, i) => ({ id: 'p' + i, plantId: 'tomato', col: i % 4, row: Math.floor(i / 4), method: 'transplant' as const, plantedOn: '2024-05-01' }));
+  const plantings = Array.from({ length: 32 }, (_, i) => ({ id: 'p' + i, plantId: 'tomato', col: i % 4, row: Math.floor(i / 4), method: 'transplant' as const, plantedOn: '2024-05-01', season: 2024 }));
   const bed = newBed({ widthFt: 4, lengthFt: 8, plantings });
 
   it('dries out without rain and recommends watering', () => {
@@ -58,7 +60,7 @@ describe('growth', () => {
 
   it('predicts maturity and flags frost in the forecast', () => {
     const w = weather('2024-05-01', 90, (i) => ({ forecast: i > 80, tMinC: i === 85 ? -1 : 16 }));
-    const r = simulateGrowth({ id: 'a', plantId: 'tomato', col: 0, row: 0, method: 'transplant', plantedOn: '2024-05-01' }, w, { today: '2024-07-20' })!;
+    const r = simulateGrowth({ id: 'a', plantId: 'tomato', col: 0, row: 0, method: 'transplant', plantedOn: '2024-05-01', season: 2024 }, w, { today: '2024-07-20' })!;
     expect(r.maturityDate).toBeDefined();
     expect(r.progress).toBeGreaterThan(0.8);
     expect(r.warnings.some((x) => x.kind === 'frost')).toBe(true);
@@ -66,13 +68,17 @@ describe('growth', () => {
 });
 
 describe('schedule', () => {
-  const g = sampleGarden();
+  const g = sampleGarden(new Date(2025, 0, 10));
   it('creates start-indoors before transplant for tomatoes', () => {
     const tasks = gardenTasks(g, 2025);
     const start = tasks.find((t) => t.kind === 'start-indoors' && t.plantId === 'tomato')!;
     const trans = tasks.find((t) => t.kind === 'transplant' && t.plantId === 'tomato')!;
     expect(start.date < trans.date).toBe(true);
     expect(trans.date).toBe('2025-04-29');
+    expect(trans.plantingIds.length).toBe(2); // both tomato squares merged
+    expect(tasks.some((t) => t.kind === 'side-dress' && t.plantId === 'tomato')).toBe(true);
+    // Beans succeed lettuce → a prep task appears
+    expect(tasks.some((t) => t.kind === 'prep' && t.plantId === 'bean')).toBe(true);
   });
 
   it('suggests peas in early spring', () => {
@@ -91,13 +97,14 @@ describe('schedule', () => {
 describe('bed', () => {
   it('detects overlaps, companions and tall-plant shading', () => {
     const bed = newBed({ widthFt: 4, lengthFt: 4, plantings: [
-      { id: 'a', plantId: 'tomato', col: 1, row: 2, method: 'transplant' },
-      { id: 'b', plantId: 'potato', col: 2, row: 2, method: 'direct' },
-      { id: 'c', plantId: 'pepper', col: 1, row: 1, method: 'transplant' },
+      { id: 'a', plantId: 'tomato', col: 1, row: 2, method: 'transplant', season: 2025 },
+      { id: 'b', plantId: 'potato', col: 2, row: 2, method: 'direct', season: 2025 },
+      { id: 'c', plantId: 'pepper', col: 1, row: 1, method: 'transplant', season: 2025 },
     ] });
-    expect(canPlace(bed, getPlant('zucchini'), 0, 0)).toBe(false);
-    expect(canPlace(bed, getPlant('zucchini'), 2, 0)).toBe(true);
-    const w = bedWarnings(bed, sampleGarden().site);
+    const site = sampleGarden().site;
+    expect(scheduleSlot(bed, site, getPlant('zucchini'), 'transplant', 0, 0, 2025).ok).toBe(false);
+    expect(scheduleSlot(bed, site, getPlant('zucchini'), 'transplant', 2, 0, 2025).ok).toBe(true);
+    const w = bedWarnings(bed, site);
     expect(w.some((x) => x.message.includes('poor companions'))).toBe(true);
     expect(w.some((x) => x.message.includes('will shade'))).toBe(true);
   });
@@ -117,5 +124,24 @@ describe('frost estimation', () => {
     expect(f.years).toBe(3);
     expect(f.lastFrost.startsWith('04')).toBe(true);
     expect(f.firstFrost.startsWith('10') || f.firstFrost.startsWith('11')).toBe(true);
+  });
+});
+
+import { bedMad, canopySquares, bedKc as kcOf } from '../src/core/water.ts';
+describe('water realism', () => {
+  it('most sensitive crop sets the refill point', () => {
+    const bed = newBed({ plantings: [
+      { id: 'a', plantId: 'zucchini', col: 0, row: 0, method: 'transplant', season: 2025, plantedOn: '2025-05-01' },
+      { id: 'b', plantId: 'spinach', col: 3, row: 3, method: 'direct', season: 2025, plantedOn: '2025-05-01' },
+    ] });
+    expect(bedMad(bed, new Date(2025, 5, 1))).toBe(0.2);
+    expect(bedMad(bed, new Date(2025, 3, 1))).toBe(0.5); // nothing planted yet → default
+  });
+  it('tall crops shade more than their square', () => {
+    expect(canopySquares(getPlant('tomato'))).toBeGreaterThan(1.5);
+    expect(canopySquares(getPlant('lettuce'))).toBe(1);
+    const one = newBed({ widthFt: 2, lengthFt: 2, plantings: [{ id: 't', plantId: 'tomato', col: 0, row: 0, method: 'transplant', season: 2025, plantedOn: '2025-05-01' }] });
+    const kc = kcOf(one, new Date(2025, 6, 15));
+    expect(kc).toBeGreaterThan((1.15 + 3 * 0.15) / 4);
   });
 });

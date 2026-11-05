@@ -1,4 +1,4 @@
-import { fetchForecast, fetchArchive } from '../src/core/weather.ts';
+import { fetchForecast, fetchArchive, fetchSeasonWeather, type SeasonWeather } from '../src/core/weather.ts';
 import type { DailyWeather, WeatherBundle } from '../src/core/types.ts';
 import { readJson, writeJson } from './store.ts';
 
@@ -31,5 +31,22 @@ export async function getArchive(lat: number, lon: number, start: string, end: s
   if (cached) return cached;
   const data = await fetchArchive(lat, lon, start, end);
   await writeJson(name, data);
+  return data;
+}
+
+const seasonCache = new Map<string, { day: string; data: SeasonWeather }>();
+
+/** Year-to-date observed + forecast daily weather, refreshed once a day (forecast part hourly). */
+export async function getSeasonWeather(lat: number, lon: number): Promise<SeasonWeather> {
+  const fc = await getForecast(lat, lon);
+  const k = key(lat, lon);
+  const hit = seasonCache.get(k);
+  if (hit && hit.day === fc.today) {
+    // Splice in the freshest forecast.
+    const first = fc.daily[0]?.date ?? fc.today;
+    return { ...hit.data, days: [...hit.data.days.filter((d) => d.date < first), ...fc.daily] };
+  }
+  const data = await fetchSeasonWeather(lat, lon, fc, (url: string) => fetch(url));
+  seasonCache.set(k, { day: fc.today, data });
   return data;
 }

@@ -1,5 +1,8 @@
-import type { Bed, BedIrrigation, Garden } from './types.ts';
-import { uid } from './util.ts';
+import type { Bed, BedIrrigation, Garden, NotifySettings } from './types.ts';
+import { uid, parseIso, isoDate } from './util.ts';
+import { planningYear } from './schedule.ts';
+import { plantingInterval, scheduleSlot, seasonOfDate } from './succession.ts';
+import { getPlant } from './plants.ts';
 
 export const defaultIrrigation = (): BedIrrigation => ({
   sensorDry: 15,
@@ -31,10 +34,74 @@ export function newBed(partial: Partial<Bed> = {}): Bed {
   };
 }
 
+export const defaultNotify = (): NotifySettings => ({ dailyDigest: true, digestHour: 7, frostAlerts: true, publishSensors: true });
+
+/** Bring older saved gardens up to the current shape. */
+export function migrateGarden(g: Garden, today = new Date()): Garden {
+  const plan = planningYear(g.site, today);
+  return {
+    ...g,
+    journal: Array.isArray(g.journal) ? g.journal : [],
+    notify: { ...defaultNotify(), ...(g.notify ?? {}) },
+    beds: g.beds.map((b) => ({
+      ...b,
+      soilTests: b.soilTests ?? [],
+      plantings: b.plantings.map((pl) =>
+        typeof pl.season === 'number' ? pl : { ...pl, season: pl.plantedOn ? seasonOfDate(g.site, parseIso(pl.plantedOn)) : plan },
+      ),
+    })),
+  };
+}
+
 /** A sample suburban lot so the app is explorable before you draw your own. */
-export function sampleGarden(): Garden {
+export function sampleGarden(today = new Date()): Garden {
+  const g = sampleGardenRaw();
+  const season = planningYear(g.site, today);
+  // Plantings for the season being planned, plus last season's crops as rotation history.
+  g.beds[0].plantings = g.beds[0].plantings.map((pl) => ({ ...pl, season }));
+  g.beds[0].plantings.push(
+    { id: 'h1', plantId: 'potato', col: 2, row: 6, method: 'direct', season: season - 1, plantedOn: `${season - 1}-04-05`, removedOn: `${season - 1}-08-01` },
+    { id: 'h2', plantId: 'potato', col: 3, row: 6, method: 'direct', season: season - 1, plantedOn: `${season - 1}-04-05`, removedOn: `${season - 1}-08-01` },
+    { id: 'h3', plantId: 'bean', col: 0, row: 0, method: 'direct', season: season - 1, plantedOn: `${season - 1}-05-10`, removedOn: `${season - 1}-08-15` },
+  );
+  // Summer beans succeed the spring lettuce in the same square.
+  const bed = g.beds[0];
+  const lettuce = bed.plantings.find((p) => p.id === 'p6')!;
+  const slot = scheduleSlot({ ...bed, plantings: bed.plantings.filter((p) => p.id !== 'p11') }, g.site, getPlant('bean'), 'direct', 1, 2, season, { earliest: plantingInterval(lettuce, g.site).end });
+  const bean = bed.plantings.find((p) => p.id === 'p11')!;
+  if (slot.ok) bean.plannedOn = isoDate(slot.start);
+  else bed.plantings = bed.plantings.filter((p) => p.id !== 'p11');
+  // A second bed already in use this season, so the daily views have something to show.
+  const cur = seasonOfDate(g.site, today);
+  const ago = (n: number) => isoDate(new Date(today.getTime() - n * 86400000));
+  g.beds.push(newBed({
+    id: 'bed_sample2', name: 'Bed 2', x: 44, y: 30, widthFt: 4, lengthFt: 4, soil: 'raised-mix',
+    plantings: [
+      { id: 'f1', plantId: 'kale', col: 0, row: 0, method: 'transplant', season: cur, plantedOn: ago(70) },
+      { id: 'f2', plantId: 'kale', col: 1, row: 0, method: 'transplant', season: cur, plantedOn: ago(70) },
+      { id: 'f3', plantId: 'spinach', col: 2, row: 0, method: 'direct', season: cur, plantedOn: ago(45) },
+      { id: 'f4', plantId: 'spinach', col: 3, row: 0, method: 'direct', season: cur, plantedOn: ago(45) },
+      { id: 'f5', plantId: 'leaf-lettuce', col: 0, row: 1, method: 'direct', season: cur, plantedOn: ago(38) },
+      { id: 'f6', plantId: 'radish', col: 1, row: 1, method: 'direct', season: cur, plantedOn: ago(30) },
+      { id: 'f7', plantId: 'carrot', col: 2, row: 1, method: 'direct', season: cur, plantedOn: ago(80) },
+      { id: 'f8', plantId: 'chive', col: 3, row: 3, method: 'transplant', season: cur - 1, plantedOn: `${cur - 1}-05-01` },
+    ],
+    irrigation: { ...defaultIrrigation(), valveEntity: 'switch.demo_bed_2_valve', moistureEntity: 'sensor.demo_bed_2_soil_moisture' },
+  }));
+  g.journal.push(
+    { id: 'j1', date: ago(12), kind: 'harvest', bedId: 'bed_sample2', plantId: 'kale', plantingId: 'f1', qty: 0.75, unit: 'lb' },
+    { id: 'j2', date: ago(5), kind: 'harvest', bedId: 'bed_sample2', plantId: 'radish', plantingId: 'f6', qty: 12, unit: 'count' },
+    { id: 'j3', date: ago(9), kind: 'pest', bedId: 'bed_sample2', plantId: 'kale', text: 'Aphids on undersides of two kale leaves — hosed off' },
+  );
+  g.beds[0].soilTests = [{ date: `${season - 1}-09-15`, ph: 6.4, organicMatterPct: 7, n: 'medium', p: 'high', k: 'medium' }];
+  return g;
+}
+
+function sampleGardenRaw(): Garden {
   return {
     version: 1,
+    journal: [],
+    notify: defaultNotify(),
     updatedAt: new Date().toISOString(),
     site: {
       name: 'My yard',
@@ -63,14 +130,17 @@ export function sampleGarden(): Garden {
         widthFt: 4,
         lengthFt: 8,
         plantings: [
-          { id: 'p1', plantId: 'tomato', col: 0, row: 0, method: 'transplant' },
-          { id: 'p2', plantId: 'tomato', col: 1, row: 0, method: 'transplant' },
-          { id: 'p3', plantId: 'basil', col: 2, row: 0, method: 'transplant' },
-          { id: 'p4', plantId: 'pepper', col: 3, row: 0, method: 'transplant' },
-          { id: 'p5', plantId: 'carrot', col: 0, row: 2, method: 'direct' },
-          { id: 'p6', plantId: 'lettuce', col: 1, row: 2, method: 'direct' },
-          { id: 'p7', plantId: 'radish', col: 2, row: 2, method: 'direct' },
-          { id: 'p8', plantId: 'bean', col: 3, row: 3, method: 'direct' },
+          { id: 'p1', plantId: 'tomato', col: 0, row: 0, method: 'transplant', season: 0 },
+          { id: 'p2', plantId: 'tomato', col: 1, row: 0, method: 'transplant', season: 0 },
+          { id: 'p3', plantId: 'basil', col: 2, row: 0, method: 'transplant', season: 0 },
+          { id: 'p4', plantId: 'pepper', col: 3, row: 0, method: 'transplant', season: 0 },
+          { id: 'p5', plantId: 'carrot', col: 0, row: 2, method: 'direct', season: 0 },
+          { id: 'p6', plantId: 'lettuce', col: 1, row: 2, method: 'direct', season: 0 },
+          { id: 'p7', plantId: 'radish', col: 2, row: 2, method: 'direct', season: 0 },
+          { id: 'p8', plantId: 'bean', col: 3, row: 3, method: 'direct', season: 0 },
+          { id: 'p9', plantId: 'eggplant', col: 2, row: 6, method: 'transplant', season: 0 },
+          { id: 'p10', plantId: 'spinach', col: 0, row: 5, method: 'direct', season: 0 },
+          { id: 'p11', plantId: 'bean', col: 1, row: 2, method: 'direct', season: 0, plannedOn: '' },
         ],
         irrigation: { ...defaultIrrigation(), valveEntity: 'switch.demo_bed_1_valve', moistureEntity: 'sensor.demo_bed_1_soil_moisture' },
       }),

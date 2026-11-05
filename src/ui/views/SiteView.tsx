@@ -12,7 +12,7 @@ import { Field, NumberInput } from '../components/Field.tsx';
 import { Chart, Stat } from '../components/Chart.tsx';
 import { SunPath } from '../components/SunPath.tsx';
 
-type Tool = 'select' | 'inspect' | 'bed' | 'building' | 'tree' | 'fence';
+type Tool = 'select' | 'inspect' | 'bed' | 'building' | 'tree' | 'fence' | 'measure';
 type Overlay = 'sun' | 'dli' | 'shadow' | 'none';
 type Sel = { type: 'bed' | 'obstacle'; id: string } | null;
 
@@ -23,7 +23,43 @@ const TOOLS: { id: Tool; label: string; icon: string; hint: string }[] = [
   { id: 'building', label: 'Building', icon: '⌂', hint: 'Drag to draw a house, shed or wall' },
   { id: 'tree', label: 'Tree', icon: '🌳', hint: 'Click to place a tree' },
   { id: 'fence', label: 'Fence', icon: '┃', hint: 'Drag to draw a fence or hedge' },
+  { id: 'measure', label: 'Measure', icon: '📏', hint: 'Drag to measure a distance — and to set the scale of a photo underlay' },
 ];
+
+/** Load an image file, downscaled so the saved garden stays small. */
+async function fileToDataUrl(file: File, maxPx = 2400): Promise<string> {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise<HTMLImageElement>((res, rej) => {
+      const i = new Image();
+      i.onload = () => res(i);
+      i.onerror = rej;
+      i.src = url;
+    });
+    const k = Math.min(1, maxPx / Math.max(img.naturalWidth, img.naturalHeight));
+    const c = document.createElement('canvas');
+    c.width = Math.round(img.naturalWidth * k);
+    c.height = Math.round(img.naturalHeight * k);
+    c.getContext('2d')!.drawImage(img, 0, 0, c.width, c.height);
+    return c.toDataURL('image/jpeg', 0.85);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function useImage(src?: string) {
+  const [img, setImg] = useState<HTMLImageElement | null>(null);
+  useEffect(() => {
+    if (!src) {
+      setImg(null);
+      return;
+    }
+    const i = new Image();
+    i.onload = () => setImg(i);
+    i.src = src;
+  }, [src]);
+  return img;
+}
 
 const PERIODS: { id: SunPeriod; label: string }[] = [
   { id: 'season', label: 'Growing season (frost-free)' },
@@ -70,6 +106,8 @@ export function SiteView() {
   const [draft, setDraft] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
   const [placeOpts, setPlaceOpts] = useState({ widthFt: 4, lengthFt: 8, targetHours: 6, count: 5 });
   const [candidates, setCandidates] = useState<PlacementCandidate[]>([]);
+  const [measure, setMeasure] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+  const underlayImg = useImage(site.underlay?.dataUrl);
   const [wrapRef, width] = useElementWidth<HTMLDivElement>();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const drag = useRef<{ sel: NonNullable<Sel>; startX: number; startY: number; lastX: number; lastY: number } | null>(null);
@@ -99,6 +137,15 @@ export function SiteView() {
     ctx.clearRect(0, 0, site.widthFt, site.depthFt);
     ctx.fillStyle = cssVar('--map-ground');
     ctx.fillRect(0, 0, site.widthFt, site.depthFt);
+    const u = site.underlay;
+    if (u && underlayImg) {
+      ctx.globalAlpha = u.opacity;
+      ctx.drawImage(underlayImg, u.x, u.y, u.widthFt, (u.widthFt * underlayImg.naturalHeight) / underlayImg.naturalWidth);
+      ctx.globalAlpha = 1;
+    }
+    // With a photo underneath, keep the analysis overlay translucent so you can trace.
+    const overlayAlpha = u && underlayImg ? 0.55 : 1;
+    ctx.globalAlpha = overlayAlpha;
 
     // Overlay
     const paintGrid = (cols: number, rows: number, cell: number, color: (i: number) => [number, number, number, number]) => {
@@ -134,6 +181,7 @@ export function SiteView() {
       });
     }
 
+    ctx.globalAlpha = 1;
     // 10 ft grid
     ctx.strokeStyle = cssVar('--map-grid');
     ctx.lineWidth = 1 / scale;
@@ -244,7 +292,7 @@ export function SiteView() {
       ctx.strokeStyle = selColor;
       ctx.lineWidth = 2 / scale;
       ctx.setLineDash([4 / scale, 3 / scale]);
-      if (tool === 'fence') {
+      if (tool === 'fence' || tool === 'measure') {
         ctx.beginPath();
         ctx.moveTo(draft.x0, draft.y0);
         ctx.lineTo(draft.x1, draft.y1);
@@ -253,6 +301,31 @@ export function SiteView() {
         ctx.strokeRect(Math.min(draft.x0, draft.x1), Math.min(draft.y0, draft.y1), Math.abs(draft.x1 - draft.x0), Math.abs(draft.y1 - draft.y0));
       }
       ctx.setLineDash([]);
+    }
+
+    const ml = draft && tool === 'measure' ? draft : measure;
+    if (ml) {
+      const d = Math.hypot(ml.x1 - ml.x0, ml.y1 - ml.y0);
+      ctx.strokeStyle = cssVar('--candidate');
+      ctx.lineWidth = 2.5 / scale;
+      ctx.beginPath();
+      ctx.moveTo(ml.x0, ml.y0);
+      ctx.lineTo(ml.x1, ml.y1);
+      ctx.stroke();
+      for (const [px, py] of [[ml.x0, ml.y0], [ml.x1, ml.y1]]) {
+        ctx.beginPath();
+        ctx.arc(px, py, 4 / scale, 0, Math.PI * 2);
+        ctx.fillStyle = cssVar('--candidate');
+        ctx.fill();
+      }
+      ctx.font = `700 ${font(12)}`;
+      ctx.textAlign = 'center';
+      ctx.fillStyle = cssVar('--surface-1');
+      const tx = (ml.x0 + ml.x1) / 2;
+      const ty = (ml.y0 + ml.y1) / 2 - 8 / scale;
+      ctx.fillRect(tx - 28 / scale, ty - 12 / scale, 56 / scale, 16 / scale);
+      ctx.fillStyle = ink;
+      ctx.fillText(`${d.toFixed(1)} ft`, tx, ty);
     }
 
     if (inspect) {
@@ -302,7 +375,7 @@ export function SiteView() {
       ctx.fill();
       ctx.stroke();
     }
-  }, [width, scale, cw, ch, site, garden.beds, sun.map, overlay, shade, sel, candidates, draft, inspect, tool, themeV]);
+  }, [width, scale, cw, ch, site, garden.beds, sun.map, overlay, shade, sel, candidates, draft, inspect, tool, themeV, underlayImg, measure]);
 
   // ---------- interaction ----------
   const toFt = (e: React.PointerEvent) => {
@@ -380,6 +453,10 @@ export function SiteView() {
     const w = Math.abs(draft.x1 - draft.x0);
     const h = Math.abs(draft.y1 - draft.y0);
     setDraft(null);
+    if (tool === 'measure') {
+      if (Math.hypot(w, h) >= 0.5) setMeasure(draft);
+      return;
+    }
     if (tool === 'building' && w >= 2 && h >= 2) {
       const id = uid('bld');
       update((g) => ({ ...g, site: { ...g.site, obstacles: [...g.site.obstacles, { id, kind: 'building', name: 'Building', heightFt: 12, points: [[x, y], [x + w, y], [x + w, y + h], [x, y + h]] }] } }));
@@ -526,6 +603,20 @@ export function SiteView() {
           )}
 
           {inspect && <PointInspector x={inspect.x} y={inspect.y} onClose={() => setInspect(null)} />}
+
+          {measure && (
+            <MeasurePanel m={measure} onClose={() => setMeasure(null)} onCalibrate={(real) => {
+              const u = site.underlay;
+              if (!u) return;
+              const measured = Math.hypot(measure.x1 - measure.x0, measure.y1 - measure.y0);
+              const k = real / measured;
+              // Scale the photo about the line's first point so that point stays put.
+              update((g) => ({ ...g, site: { ...g.site, underlay: { ...u, widthFt: u.widthFt * k, x: measure.x0 - (measure.x0 - u.x) * k, y: measure.y0 - (measure.y0 - u.y) * k } } }));
+              setMeasure({ x0: measure.x0, y0: measure.y0, x1: measure.x0 + (measure.x1 - measure.x0) * k, y1: measure.y0 + (measure.y1 - measure.y0) * k });
+            }} hasUnderlay={!!site.underlay} />
+          )}
+
+          <UnderlayPanel />
 
           <section className="card">
             <h3>Find the sunniest spot for a bed</h3>
@@ -686,6 +777,66 @@ function PointInspector({ x, y, onClose }: { x: number; y: number; onClose: () =
         refLines={[{ y: 6, label: 'Full sun 6h' }]}
         height={180}
       />
+    </section>
+  );
+}
+
+function MeasurePanel({ m, onClose, onCalibrate, hasUnderlay }: { m: { x0: number; y0: number; x1: number; y1: number }; onClose: () => void; onCalibrate: (realFt: number) => void; hasUnderlay: boolean }) {
+  const d = Math.hypot(m.x1 - m.x0, m.y1 - m.y0);
+  const [real, setReal] = useState(Math.round(d));
+  return (
+    <section className="card">
+      <div className="row between"><h3>Measured {d.toFixed(1)} ft</h3><button className="link" onClick={onClose} aria-label="Close">✕</button></div>
+      {hasUnderlay ? (
+        <>
+          <p className="small">If this line follows something you know the length of on the photo (a house wall, fence run, driveway), enter its real length to scale the photo:</p>
+          <div className="row gap">
+            <NumberInput value={real} min={0.5} step={0.5} suffix="ft" onChange={setReal} />
+            <button className="primary" onClick={() => onCalibrate(real)}>Scale photo</button>
+          </div>
+        </>
+      ) : <p className="muted small">Add a photo underlay below to trace your property at true scale.</p>}
+    </section>
+  );
+}
+
+function UnderlayPanel() {
+  const { garden, update } = useGarden();
+  const u = garden.site.underlay;
+  const [busy, setBusy] = useState(false);
+  const setU = (patch: Partial<NonNullable<typeof u>>) => u && update((g) => ({ ...g, site: { ...g.site, underlay: { ...u, ...patch } } }));
+  return (
+    <section className="card">
+      <h3>Trace over an aerial photo</h3>
+      {!u ? (
+        <>
+          <p className="muted small">Screenshot your yard from a satellite or plat map, add it here, then use <b>Measure</b> along a known length to set its scale. Draw buildings, trees and beds on top.</p>
+          <label className="file-btn">
+            <input type="file" accept="image/*" disabled={busy} onChange={async (e) => {
+              const f = e.target.files?.[0];
+              if (!f) return;
+              setBusy(true);
+              try {
+                const dataUrl = await fileToDataUrl(f);
+                update((g) => ({ ...g, site: { ...g.site, underlay: { dataUrl, x: 0, y: 0, widthFt: g.site.widthFt, opacity: 0.6 } } }));
+              } finally {
+                setBusy(false);
+              }
+            }} />
+            <span>{busy ? 'Loading…' : 'Choose image…'}</span>
+          </label>
+        </>
+      ) : (
+        <>
+          <div className="grid2">
+            <Field label="Photo width"><NumberInput value={u.widthFt} min={5} step={1} suffix="ft" onChange={(v) => setU({ widthFt: v })} /></Field>
+            <Field label="Opacity"><input type="range" min={0.1} max={1} step={0.05} value={u.opacity} onChange={(e) => setU({ opacity: +e.target.value })} /></Field>
+            <Field label="Offset left"><NumberInput value={u.x} step={1} suffix="ft" onChange={(v) => setU({ x: v })} /></Field>
+            <Field label="Offset top"><NumberInput value={u.y} step={1} suffix="ft" onChange={(v) => setU({ y: v })} /></Field>
+          </div>
+          <button className="danger" onClick={() => update((g) => ({ ...g, site: { ...g.site, underlay: undefined } }))}>Remove photo</button>
+        </>
+      )}
     </section>
   );
 }

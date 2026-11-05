@@ -55,6 +55,8 @@ export interface Site {
   lastFrost: string;
   firstFrost: string;
   obstacles: Obstacle[];
+  /** Aerial photo / plan drawn under the map for tracing. */
+  underlay?: { dataUrl: string; x: number; y: number; widthFt: number; opacity: number };
 }
 
 export interface BedPlanting {
@@ -62,11 +64,28 @@ export interface BedPlanting {
   plantId: string;
   col: number;
   row: number;
-  /** ISO date (YYYY-MM-DD) seeded or transplanted into the bed; undefined = planned. */
+  /** Season (year of the spring last frost) this planting belongs to. */
+  season: number;
+  /** Planned date it goes into the bed (sow or transplant). */
+  plannedOn?: string;
+  /** ISO date (YYYY-MM-DD) actually seeded or transplanted into the bed. */
   plantedOn?: string;
+  /** Date the crop was pulled; frees the square. */
+  removedOn?: string;
   method: 'direct' | 'transplant';
   /** Overrides the plant's default plants-per-square. */
   count?: number;
+}
+
+export type NutrientLevel = 'low' | 'medium' | 'high' | 'very-high';
+
+export interface SoilTest {
+  date: string;
+  ph: number;
+  organicMatterPct?: number;
+  n?: NutrientLevel;
+  p?: NutrientLevel;
+  k?: NutrientLevel;
 }
 
 export type IrrigationMode = 'off' | 'suggest' | 'auto';
@@ -107,14 +126,42 @@ export interface Bed {
   mulched: boolean;
   plantings: BedPlanting[];
   irrigation: BedIrrigation;
+  soilTests?: SoilTest[];
   /** Cached result of the latest growing-season sun analysis for this bed's footprint. */
   analysis?: { sunHours: number; maxSunHours: number; dli: number; computedAt: string };
+}
+
+export type JournalKind = 'harvest' | 'note' | 'pest' | 'disease' | 'treatment' | 'fertilize' | 'amend' | 'sow' | 'other';
+
+export interface JournalEntry {
+  id: string;
+  date: string;
+  kind: JournalKind;
+  bedId?: string;
+  plantingId?: string;
+  plantId?: string;
+  /** Harvest quantity. */
+  qty?: number;
+  unit?: 'lb' | 'oz' | 'kg' | 'g' | 'count' | 'bunch';
+  text?: string;
+}
+
+export interface NotifySettings {
+  /** HA notify service, e.g. "notify.mobile_app_pixel_8". */
+  service?: string;
+  dailyDigest: boolean;
+  digestHour: number;
+  frostAlerts: boolean;
+  /** Publish per-bed sensors (soil water, next watering) into Home Assistant. */
+  publishSensors: boolean;
 }
 
 export interface Garden {
   version: 1;
   site: Site;
   beds: Bed[];
+  journal: JournalEntry[];
+  notify: NotifySettings;
   updatedAt: string;
 }
 
@@ -143,6 +190,14 @@ export interface DailyWeather {
   forecast: boolean;
 }
 
+export interface HourlyWeather {
+  /** Local time "YYYY-MM-DDTHH:00" */
+  time: string[];
+  tempC: number[];
+  rh: number[];
+  precipMm: number[];
+}
+
 export interface WeatherBundle {
   lat: number;
   lon: number;
@@ -150,5 +205,6 @@ export interface WeatherBundle {
   utcOffsetSeconds: number;
   today: string;
   daily: DailyWeather[];
+  hourly?: HourlyWeather;
   fetchedAt: string;
 }

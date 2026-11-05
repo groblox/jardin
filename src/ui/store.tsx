@@ -1,10 +1,11 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { Garden, WeatherBundle } from '../core/types.ts';
-import { sampleGarden } from '../core/defaults.ts';
+import { migrateGarden, sampleGarden } from '../core/defaults.ts';
 import { periodDates, type SunMap, type SunPeriod } from '../core/shade.ts';
 import { api, probeServer, type IrrigationStatus } from './api.ts';
+import type { SeasonWeather } from '../core/weather.ts';
 
-export type Tab = 'site' | 'beds' | 'plan' | 'water' | 'forecast' | 'simulate' | 'settings';
+export type Tab = 'today' | 'site' | 'beds' | 'plan' | 'water' | 'health' | 'forecast' | 'simulate' | 'journal' | 'settings';
 
 interface SunState {
   map: SunMap | null;
@@ -20,10 +21,17 @@ interface Ctx {
   ready: boolean;
   server: boolean;
   garden: Garden;
-  update: (fn: (g: Garden) => Garden) => void;
+  update: (fn: (g: Garden) => Garden, opts?: { history?: boolean }) => void;
+  undo: () => void;
+  redo: () => void;
+  canUndo: boolean;
+  canRedo: boolean;
   weather: WeatherBundle | null;
   weatherError: string | null;
   refreshWeather: () => void;
+  seasonWeather: SeasonWeather | null;
+  /** Latest soil-moisture reading per bed id (server mode). */
+  readings: Record<string, number | null>;
   sun: SunState;
   setSunPeriod: (p: SunPeriod, date?: string) => void;
   irrigation: IrrigationStatus | null;
@@ -70,15 +78,17 @@ function useSunWorker() {
 export function GardenProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false);
   const [server, setServer] = useState(false);
-  const [garden, setGarden] = useState<Garden>(sampleGarden);
+  const [garden, setGarden] = useState<Garden>(() => sampleGarden());
   const [weather, setWeather] = useState<WeatherBundle | null>(null);
   const [weatherError, setWeatherError] = useState<string | null>(null);
   const [irrigation, setIrrigation] = useState<IrrigationStatus | null>(null);
+  const [seasonWeather, setSeasonWeather] = useState<SeasonWeather | null>(null);
+  const [readings, setReadings] = useState<Record<string, number | null>>({});
   const [tab, setTabState] = useState<Tab>(() => {
     try {
-      return (localStorage.getItem('jardin.tab') as Tab) || 'site';
+      return (localStorage.getItem('jardin.tab') as Tab) || 'today';
     } catch {
-      return 'site';
+      return 'today';
     }
   });
   const [selectedBedId, setSelectedBedId] = useState<string | null>(null);
@@ -104,7 +114,7 @@ export function GardenProvider({ children }: { children: ReactNode }) {
       setServer(s);
       try {
         const g = await api.loadGarden(s);
-        if (g) setGarden(g);
+        if (g) setGarden(migrateGarden(g));
       } catch (e) {
         console.error(e);
       }
@@ -112,10 +122,66 @@ export function GardenProvider({ children }: { children: ReactNode }) {
     })();
   }, []);
 
-  const update = useCallback((fn: (g: Garden) => Garden) => {
+  // Undo/redo: snapshots of the garden, with rapid edits (drags, typing) coalesced.
+  // Bookkeeping happens outside state updaters (StrictMode runs updaters twice).
+  const gardenRef = useRef(garden);
+  gardenRef.current = garden;
+  const past = useRef<Garden[]>([]);
+  const future = useRef<Garden[]>([]);
+  const lastPush = useRef(0);
+  const [histV, setHistV] = useState(0);
+  const commit = (next: Garden) => {
+    gardenRef.current = next;
     dirty.current = true;
-    setGarden((g) => fn(g));
+    setGarden(next);
+  };
+  const update = useCallback((fn: (g: Garden) => Garden, opts?: { history?: boolean }) => {
+    const g = gardenRef.current;
+    const next = fn(g);
+    if (next === g) return;
+    if (opts?.history !== false) {
+      const now = Date.now();
+      if (now - lastPush.current > 700) {
+        past.current = [...past.current.slice(-79), g];
+        future.current = [];
+        setHistV((v) => v + 1);
+      }
+      lastPush.current = now;
+    }
+    commit(next);
   }, []);
+  const undo = useCallback(() => {
+    const prev = past.current.pop();
+    if (!prev) return;
+    future.current.push(gardenRef.current);
+    lastPush.current = 0;
+    commit(prev);
+    setHistV((v) => v + 1);
+  }, []);
+  const redo = useCallback(() => {
+    const next = future.current.pop();
+    if (!next) return;
+    past.current.push(gardenRef.current);
+    lastPush.current = 0;
+    commit(next);
+    setHistV((v) => v + 1);
+  }, []);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) return;
+      if (!(e.ctrlKey || e.metaKey)) return;
+      if (e.key.toLowerCase() === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        undo();
+      } else if ((e.key.toLowerCase() === 'z' && e.shiftKey) || e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        redo();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [undo, redo]);
 
   // Debounced save.
   useEffect(() => {
@@ -138,6 +204,35 @@ export function GardenProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (ready) refreshWeather();
   }, [ready, refreshWeather]);
+
+  // Year-to-date weather for degree-day pest models (once per forecast refresh).
+  useEffect(() => {
+    if (!weather) return;
+    api.seasonWeather(server, garden.site.lat, garden.site.lon, weather).then(setSeasonWeather, () => setSeasonWeather(null));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [weather?.fetchedAt, server]);
+
+  // Soil-moisture readings for every bed with a sensor.
+  const sensorKey = garden.beds.map((b) => `${b.id}=${b.irrigation.moistureEntity ?? ''}`).join('|');
+  useEffect(() => {
+    if (!server) return;
+    let live = true;
+    const load = async () => {
+      const out: Record<string, number | null> = {};
+      for (const b of garden.beds) {
+        if (!b.irrigation.moistureEntity) continue;
+        out[b.id] = await api.value(b.irrigation.moistureEntity).then((r) => r.value, () => null);
+      }
+      if (live) setReadings(out);
+    };
+    load();
+    const t = setInterval(load, 60000);
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [server, sensorKey]);
 
   const refreshIrrigation = useCallback(async () => {
     if (!server) return;
@@ -206,7 +301,7 @@ export function GardenProvider({ children }: { children: ReactNode }) {
       }
       return b;
     });
-    if (changed) update((g) => ({ ...g, beds: g.beds.map((b) => beds.find((x) => x.id === b.id) ?? b) }));
+    if (changed) update((g) => ({ ...g, beds: g.beds.map((b) => beds.find((x) => x.id === b.id) ?? b) }), { history: false });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sun.season, bedsKey]);
 
@@ -214,11 +309,11 @@ export function GardenProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<Ctx>(
     () => ({
-      ready, server, garden, update, weather, weatherError, refreshWeather, sun, setSunPeriod, irrigation, refreshIrrigation,
-      tab, setTab, selectedBedId, setSelectedBedId, saveState,
+      ready, server, garden, update, weather, weatherError, refreshWeather, seasonWeather, readings, sun, setSunPeriod, irrigation, refreshIrrigation,
+      tab, setTab, selectedBedId, setSelectedBedId, saveState, undo, redo, canUndo: past.current.length > 0, canRedo: future.current.length > 0,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [ready, server, garden, weather, weatherError, sun, irrigation, tab, selectedBedId, saveState, refreshWeather, refreshIrrigation],
+    [ready, server, garden, weather, weatherError, seasonWeather, readings, sun, irrigation, tab, selectedBedId, saveState, refreshWeather, refreshIrrigation, histV],
   );
   return <GardenCtx.Provider value={value}>{children}</GardenCtx.Provider>;
 }

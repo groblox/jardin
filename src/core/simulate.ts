@@ -3,8 +3,9 @@
 import type { Bed, DailyWeather, Garden } from './types.ts';
 import { PLANT_BY_ID } from './plants.ts';
 import { developmentRate, frostThresholdC } from './growth.ts';
-import { plantTimeline, seasonFor } from './schedule.ts';
-import { bedKc, etScaleFor, gallonsForDepth, MAD, tawMm } from './water.ts';
+import { seasonFor } from './schedule.ts';
+import { plantingInterval } from './succession.ts';
+import { bedKc, bedMad, etScaleFor, gallonsForDepth, tawMm } from './water.ts';
 import { addDays, isoDate, mmToIn, parseIso } from './util.ts';
 
 export interface CropSim {
@@ -31,24 +32,25 @@ export interface SeasonSim {
   stressDays: number;
 }
 
-export function simulateSeason(garden: Garden, bed: Bed, days: DailyWeather[], year: number): SeasonSim {
+/**
+ * Replay `planSeason`'s plantings for `bed` against the weather of `year`
+ * (dates keep their calendar position).
+ */
+export function simulateSeason(garden: Garden, bed: Bed, days: DailyWeather[], year: number, planSeason = year): SeasonSim {
   const season = seasonFor(garden.site, year);
   const byDate = new Map(days.map((d) => [d.date, d]));
   const crops: CropSim[] = [];
 
+  const shift = year - planSeason;
+  const shiftIso = (d: Date) => `${d.getFullYear() + shift}-${isoDate(d).slice(5)}`;
   const planted: Bed = {
     ...bed,
-    plantings: bed.plantings.map((pl) => {
-      const plant = PLANT_BY_ID[pl.plantId];
-      let date: string;
-      if (pl.plantedOn) date = `${year}-${pl.plantedOn.slice(5)}`;
-      else {
-        const t = plantTimeline(plant, season);
-        const d = pl.method === 'transplant' ? t.transplant ?? t.directSow?.[0] : t.directSow?.[0] ?? t.transplant;
-        date = isoDate(d ?? t.fallSow ?? season.lastFrost);
-      }
-      return { ...pl, plantedOn: date };
-    }),
+    plantings: bed.plantings
+      .filter((pl) => pl.season === planSeason && PLANT_BY_ID[pl.plantId])
+      .map((pl) => {
+        const iv = plantingInterval(pl, garden.site);
+        return { ...pl, plantedOn: shiftIso(iv.start), removedOn: pl.removedOn ? shiftIso(iv.end) : undefined };
+      }),
   };
 
   for (const pl of planted.plantings) {
@@ -80,7 +82,6 @@ export function simulateSeason(garden: Garden, bed: Bed, days: DailyWeather[], y
 
   // Water balance with ideal automatic irrigation (refill whenever the refill point is crossed).
   const taw = tawMm(planted);
-  const raw = MAD * taw;
   const scale = etScaleFor(bed);
   let D = 0.3 * taw;
   let events = 0;
@@ -97,7 +98,7 @@ export function simulateSeason(garden: Garden, bed: Bed, days: DailyWeather[], y
     const eff = w.precipMm < 1 ? 0 : w.precipMm * 0.9;
     D = Math.max(0, D + etc - eff);
     let irr = 0;
-    if (D > raw) {
+    if (D > bedMad(planted, parseIso(w.date)) * taw) {
       stress++;
       irr = D;
       D = 0;

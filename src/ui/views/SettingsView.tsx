@@ -106,6 +106,7 @@ export function SettingsView() {
       </section>
 
       <HaSection />
+      <NotifySection />
 
       <section className="card">
         <h3>Data</h3>
@@ -168,6 +169,49 @@ function HaSection() {
         </>
       )}
       <p className="muted small">Valves can be any <code>switch.*</code>, <code>valve.*</code> or <code>input_boolean.*</code>. Jardin always turns valves off at the end of a run, and again after a restart if a run was interrupted. As a second safety net, add an HA automation that turns each valve off after its max run time.</p>
+    </section>
+  );
+}
+
+function NotifySection() {
+  const { garden, update, server } = useGarden();
+  const n = garden.notify;
+  const set = (patch: Partial<typeof n>) => update((g) => ({ ...g, notify: { ...g.notify, ...patch } }));
+  const [status, setStatus] = useState<Awaited<ReturnType<typeof api.notifyStatus>> | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  useEffect(() => {
+    if (server) api.notifyStatus().then(setStatus, () => {});
+  }, [server]);
+  if (!server) return null;
+  return (
+    <section className="card">
+      <h3>Notifications & Home Assistant sensors</h3>
+      <div className="grid3">
+        <Field label="Notify service" hint="e.g. notify.mobile_app_your_phone. Leave empty for a persistent notification in the HA UI.">
+          <input value={n.service ?? ''} placeholder="notify.mobile_app_…" onChange={(e) => set({ service: e.target.value || undefined })} />
+        </Field>
+        <Field label="Daily digest at"><NumberInput value={n.digestHour} min={0} max={23} suffix=":00" onChange={(v) => set({ digestHour: Math.round(v) })} /></Field>
+      </div>
+      <label className="row gap"><input type="checkbox" checked={n.dailyDigest} onChange={(e) => set({ dailyDigest: e.target.checked })} /> Morning digest of today’s garden to-dos</label>
+      <label className="row gap"><input type="checkbox" checked={n.frostAlerts} onChange={(e) => set({ frostAlerts: e.target.checked })} /> Afternoon frost alert when tender crops are at risk tonight</label>
+      <label className="row gap"><input type="checkbox" checked={n.publishSensors} onChange={(e) => set({ publishSensors: e.target.checked })} /> Publish <code>sensor.jardin_&lt;bed&gt;_soil_water</code> and <code>sensor.jardin_todo_today</code> to Home Assistant (for dashboards & automations)</label>
+      <div className="row gap wrap">
+        <button onClick={async () => { try { const d = await api.notifyTest(); setMsg(`Sent: ${d.title}`); setStatus(await api.notifyStatus()); } catch (e: any) { setMsg(e.message); } }}>Send digest now</button>
+        {msg && <span className="small">{msg}</span>}
+      </div>
+      {status && (
+        <p className="muted small">
+          {status.mode === 'demo' ? 'Demo mode: notifications are logged on the server instead of sent. ' : ''}
+          {status.lastDigest ? `Last digest ${status.lastDigest}. ` : ''}{status.lastPublish ? `Sensors published ${new Date(status.lastPublish).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}. ` : ''}
+          {status.lastError ? `Last error: ${status.lastError}` : ''}
+        </p>
+      )}
+      {status?.sent.length ? (
+        <details>
+          <summary className="small">Recent notifications</summary>
+          <ul className="journal-mini">{[...status.sent].reverse().map((x, i) => <li key={i}><b>{x.title}</b><pre className="small pre">{x.message}</pre></li>)}</ul>
+        </details>
+      ) : null}
     </section>
   );
 }

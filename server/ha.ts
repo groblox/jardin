@@ -164,3 +164,18 @@ export async function haStatus() {
   }
   return { mode, ok, error, version, url: mode === 'manual' ? cfg.url : undefined };
 }
+
+/** Call any Home Assistant service (no-op that logs in demo mode). */
+export async function callService(domain: string, service: string, data: Record<string, unknown>): Promise<void> {
+  if (haMode() === 'demo') {
+    console.log(`[demo] ${domain}.${service}`, JSON.stringify(data).slice(0, 300));
+    return;
+  }
+  await ha(`/services/${domain}/${service}`, { method: 'POST', body: JSON.stringify(data) });
+}
+
+/** Create/update a state in Home Assistant (shows up as an entity until HA restarts; we re-publish regularly). */
+export async function setState(entityId: string, state: string | number, attributes: Record<string, unknown>): Promise<void> {
+  if (haMode() === 'demo') return;
+  await ha(`/states/${entityId}`, { method: 'POST', body: JSON.stringify({ state: String(state), attributes }) });
+}

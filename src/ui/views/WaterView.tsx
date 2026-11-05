@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type { Bed, BedIrrigation, IrrigationMode } from '../../core/types.ts';
 import { useGarden } from '../store.tsx';
 import { api, type HaEntityLite } from '../api.ts';
-import { evaluateBed, gallonsForDepth, MAD } from '../../core/water.ts';
+import { evaluateBed, gallonsForDepth } from '../../core/water.ts';
 import { fmtDate, mmToIn } from '../../core/util.ts';
 import { Chart, Meter, Stat } from '../components/Chart.tsx';
 import { Field, NumberInput, Status } from '../components/Field.tsx';
@@ -122,11 +122,11 @@ function BedWater({ bed, entities }: { bed: Bed; entities: HaEntityLite[] }) {
           </div>
           <div className="stats">
             <Stat label="Soil water available" value={`${Math.round(todayDay.available * 100)}%`} sub={ev.sensorFraction != null ? `sensor ${reading?.toFixed(1)}% → calibrated` : 'modelled (no sensor)'} />
-            <Stat label="Root zone holds" value={`${mmToIn(ev.sim.taw).toFixed(2)}"`} sub={`refill below ${Math.round((1 - MAD) * 100)}%`} />
+            <Stat label="Root zone holds" value={`${mmToIn(ev.sim.taw).toFixed(2)}"`} sub={`refill below ${Math.round((1 - ev.sim.raw / ev.sim.taw) * 100)}% (most sensitive crop)`} />
             <Stat label="Today's use (ETc)" value={`${mmToIn(todayDay.etc).toFixed(2)}"`} sub={`${gallonsForDepth(bed, todayDay.etc).toFixed(1)} gal`} />
             <Stat label={rec.action === 'water-now' ? 'Water now' : 'Next watering'} value={rec.depthMm > 0 ? `${mmToIn(rec.depthMm).toFixed(2)}"` : '—'} sub={rec.depthMm > 0 ? `${rec.gallons.toFixed(1)} gal · ${rec.minutes.toFixed(0)} min${rec.date ? ' · ~' + fmtDate(rec.date) : ''}` : 'not needed'} />
           </div>
-          <Meter value={todayDay.available} tone={todayDay.available < 1 - MAD ? 'critical' : todayDay.available < 0.65 ? 'warning' : 'good'} label="Soil water available" />
+          <Meter value={todayDay.available} tone={todayDay.available < 1 - ev.sim.raw / ev.sim.taw ? 'critical' : todayDay.available < 1 - (0.7 * ev.sim.raw) / ev.sim.taw ? 'warning' : 'good'} label="Soil water available" />
         </section>
 
         <section className="card">
@@ -136,7 +136,7 @@ function BedWater({ bed, entities }: { bed: Bed; entities: HaEntityLite[] }) {
             labels={labels}
             formatLabel={(_, i) => fmtDate(days[i].date, { weekday: 'short', month: 'short', day: 'numeric' })}
             series={[{ id: 'avail', label: 'Available water', color: 'var(--series-1)', kind: 'line', values: days.map((d) => d.available * 100) }]}
-            refLines={[{ y: (1 - MAD) * 100, label: 'Refill point' }]}
+            refLines={[{ y: (1 - ev.sim.raw / ev.sim.taw) * 100, label: 'Refill point' }]}
             forecastFrom={fcFrom >= 0 ? fcFrom : undefined}
             yMin={0}
             yMax={100}
@@ -245,7 +245,7 @@ function BedWater({ bed, entities }: { bed: Bed; entities: HaEntityLite[] }) {
             <Field label="Flow (whole bed)"><NumberInput value={bed.irrigation.flowGpm} step={0.05} min={0.01} suffix="gal/min" onChange={(v) => setIrr({ flowGpm: v })} /></Field>
             <Field label="Efficiency"><NumberInput value={bed.irrigation.efficiency} step={0.05} min={0.1} max={1} onChange={(v) => setIrr({ efficiency: v })} /></Field>
             <Field label="Window start"><NumberInput value={bed.irrigation.windowStartHour} min={0} max={23} suffix="h" onChange={(v) => setIrr({ windowStartHour: Math.round(v) })} /></Field>
-            <Field label="Window end"><NumberInput value={bed.irrigation.windowEndHour} min={0} max={23} suffix="h" onChange={(v) => setIrr({ windowEndHour: Math.round(v) })} /></Field>
+            <Field label="Window end"><NumberInput value={bed.irrigation.windowEndHour} min={0} max={24} suffix="h" onChange={(v) => setIrr({ windowEndHour: Math.round(v) })} /></Field>
             <Field label="Max run"><NumberInput value={bed.irrigation.maxMinutes} min={1} max={120} suffix="min" onChange={(v) => setIrr({ maxMinutes: v })} /></Field>
             <Field label="Skip if rain ≥"><NumberInput value={bed.irrigation.rainSkipIn} step={0.05} min={0} suffix="in" onChange={(v) => setIrr({ rainSkipIn: v })} /></Field>
           </div>
