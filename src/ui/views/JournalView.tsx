@@ -15,11 +15,17 @@ export function JournalView() {
   const [season, setSeason] = useState(() => seasonOfDate(garden.site, today));
   const [filterKind, setFilterKind] = useState<string>('');
   const [filterBed, setFilterBed] = useState<string>('');
+  const [search, setSearch] = useState('');
   const [draft, setDraft] = useState<Omit<JournalEntry, 'id'>>({ date: isoDate(today), kind: 'harvest', qty: 1, unit: 'lb' });
 
   const yields = useMemo(() => seasonYields(garden, season).filter((y) => y.expectedLb > 0 || y.harvestedLb > 0), [garden, season]);
+  // Search spans every season (like GrowVeg's journal search); without a query, show the chosen season.
+  const words = search.toLowerCase().split(/\s+/).filter(Boolean);
+  const haystack = (e: JournalEntry) =>
+    [e.text, PLANT_BY_ID[e.plantId ?? '']?.name, garden.beds.find((b) => b.id === e.bedId)?.name, JOURNAL_KINDS.find((k) => k.id === e.kind)?.label, e.date]
+      .filter(Boolean).join(' ').toLowerCase();
   const entries = garden.journal
-    .filter((e) => seasonOfDate(garden.site, parseIso(e.date)) === season)
+    .filter((e) => (words.length ? words.every((w) => haystack(e).includes(w)) : seasonOfDate(garden.site, parseIso(e.date)) === season))
     .filter((e) => !filterKind || e.kind === filterKind)
     .filter((e) => !filterBed || e.bedId === filterBed)
     .sort((a, b) => b.date.localeCompare(a.date));
@@ -95,13 +101,14 @@ export function JournalView() {
               )}
             </div>
             <Field label="Notes"><input value={draft.text ?? ''} onChange={(e) => setDraft({ ...draft, text: e.target.value })} placeholder="What you saw or did" /></Field>
-            <button className="primary" onClick={save} disabled={draft.kind === 'harvest' && !draft.plantId}>Add entry</button>
+            <button className="primary" onClick={save} disabled={draft.kind === 'harvest' ? !draft.plantId || !(draft.qty! > 0) : !draft.text?.trim() && !draft.plantId}>Add entry</button>
           </section>
 
           <section className="card">
             <div className="row between wrap gap">
-              <h3>Entries</h3>
-              <span className="row gap">
+              <h3>{words.length ? `${entries.length} match${entries.length === 1 ? '' : 'es'} in all seasons` : 'Entries'}</h3>
+              <span className="row gap wrap">
+                <input type="search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search notes, crops, beds…" aria-label="Search the journal" />
                 <select value={filterKind} onChange={(e) => setFilterKind(e.target.value)} aria-label="Filter type">
                   <option value="">All types</option>
                   {JOURNAL_KINDS.map((k) => <option key={k.id} value={k.id}>{k.label}</option>)}
@@ -112,13 +119,13 @@ export function JournalView() {
                 </select>
               </span>
             </div>
-            {entries.length === 0 && <p className="muted">No entries yet for {season}. Harvests logged from Today or Beds show up here.</p>}
+            {entries.length === 0 && <p className="muted">{words.length ? 'Nothing in the journal matches.' : `No entries yet for ${season}. Harvests logged from Today or Beds show up here.`}</p>}
             <ul className="journal-list">
               {entries.map((e) => {
                 const k = JOURNAL_KINDS.find((x) => x.id === e.kind);
                 return (
                   <li key={e.id}>
-                    <span className="tabular muted">{fmtDate(e.date)}</span>
+                    <span className="tabular muted">{fmtDate(e.date, words.length ? { month: 'short', day: 'numeric', year: 'numeric' } : undefined)}</span>
                     <span aria-hidden="true">{k?.icon}</span>
                     <span className="grow">
                       <b>{k?.label}</b>

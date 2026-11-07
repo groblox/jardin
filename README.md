@@ -16,20 +16,29 @@ Garden planning and maintenance for people who want more than a pretty grid. Jar
 - **Due tasks**: start seeds, harden off, prep squares between successions, sow/transplant, side-dress heavy feeders. One tap marks them done.
 - **Pest & disease alerts** for the crops you're growing (see Health).
 - **Soil jobs** before the season: lime/sulfur amounts, soil-test reminders. Crops still in their planting window but not yet in your plan.
+- **Coming up**: the next two weeks of jobs after this week's list (seed starting, sowing, side-dressing, harvest windows opening).
+- Keeps working when the forecast can't be fetched: tasks, harvests and notes still show, and weather alerts pause with a Retry button.
 
 **Beds**: square-foot planning across time.
 - Every planting occupies its squares for a date range, so a square can hold spring lettuce → summer beans → fall spinach. Scrub through the season to see the bed on any date.
 - Click a square with a plant selected and Jardin schedules it into the first free slot in that crop's planting window. It won't let a tender crop go in too late to mature before frost.
+- **Drag across squares** to plan (or erase) a whole row at once; dragging skips squares that are busy on the date shown.
+- **Plant filters**: what's in its planting window today, what gets enough sun in this bed, cool- or warm-season crops.
+- **+ Succession** on any planting plans the next sowing of the same crop (every 14–21 days, by crop) in the nearest free square; click again to extend the chain.
 - **What can follow**: for any square, the crops that fit the remaining season, ranked for rotation (different family, legumes after heavy feeders).
 - **Crop rotation** across years: warns when nightshades, brassicas, alliums or cucurbits return to the same squares within their 2–3-year rotation interval.
 - Companion conflicts only between crops growing at the same time. Squares too shady for the crop (from the sun model). Tall crops shading shorter sun-lovers.
 - **Soil**: record soil tests (pH, organic matter, N-P-K). Get pH fit for the planned crops, exact lime/sulfur pounds for the bed by soil type (split into safe doses), nutrient advice and compost quantities.
 - Planted/pulled dates, harvest logging and expected yield per bed.
+- Making a bed smaller never deletes plantings: ones that no longer fit are flagged with a one-click remove.
 
 **Plan**
 - Season timeline per planting (seedlings indoors → in the bed → harvest, with each crop's planting windows).
 - Generated task list, including bed prep between successions and side-dressing.
 - Weather-adjusted "growing now" progress, "plant now" suggestions, and expected harvest vs. logged harvest per crop.
+- **Seeds & plants list**: how many seeds to sow or start indoors (cells too) for everything planned but not yet in the ground, allowing for typical germination and ~25% spares, and by when. Seed potatoes, garlic, strawberries and mint are listed as things to buy. Copy it as a shopping list.
+- **Seed box**: record packets (crop, variety, year, how much is left). The list shows what you already have, what you need, and packets past their usual storage life (with a germination-test tip); old seed raises the seed count.
+- **Print plan**: a clean printout of the timeline, seed list and tasks.
 
 **Health**
 - **Pests timed by degree-days** since January 1, from local observed and forecast weather. Examples: cabbage/onion/seedcorn maggot flights, Colorado potato beetle, European corn borer, squash vine borer, Japanese beetle. Each gives the projected date of the next stage and what to do (row covers *before* the flight, etc.).
@@ -40,7 +49,7 @@ Garden planning and maintenance for people who want more than a pretty grid. Jar
   - blossom-drop temperatures.
 - Leaf-wetness chart, and a log of sightings and treatments.
 
-**Journal**: harvests, observations, pests, treatments, feeding and amendments. Harvest totals and lb/sq ft vs. the plan's expected yield. CSV export.
+**Journal**: harvests, observations, pests, treatments, feeding and amendments. **Search** across every season (notes, crops, beds). Harvest totals and lb/sq ft vs. the plan's expected yield. CSV export.
 
 **Site & sun**
 - Draw your property: buildings (prisms), trees (ellipsoid crowns, deciduous or evergreen), fences and hedges, each with a real height. You can **trace over an aerial photo**: the measure tool sets its scale from any known length.
@@ -76,6 +85,9 @@ Garden planning and maintenance for people who want more than a pretty grid. Jar
 - Location from GPS and map north.
 - Frost dates **estimated from 10 years of local weather history**.
 - Notifications. JSON import/export. Undo/redo everywhere (Ctrl+Z / Ctrl+Shift+Z).
+- **Backups**: the server snapshots the garden before the first save each day and before any save that removes beds or many plantings or journal entries. The newest 20 can be restored from Settings (undoable).
+
+**Phone + desktop**: edits from another device show up when you come back to the app (and every minute). If two devices edit at once, the second save is refused rather than overwriting, and you choose which version to keep. A last edit made just before switching apps is still saved.
 
 ## Running it
 
@@ -97,6 +109,8 @@ npm run typecheck
 ```
 
 Without Home Assistant configured, the server runs in **demo mode**. It simulates moisture sensors and valves (`sensor.demo_bed_N_soil_moisture`, `switch.demo_bed_N_valve`), so you can try everything.
+
+No internet for weather (offline demo, locked-down sandbox)? Seed synthetic forecast weather with `node scripts/fake-weather.ts ./data` before starting the server.
 
 The UI also works as a purely static site (`dist/`) with no server. Data then lives in the browser and weather comes straight from Open-Meteo, but Home Assistant control needs the server.
 
@@ -123,6 +137,7 @@ src/core/      pure, tested domain logic shared by UI and server
   health.ts      degree-day pest models; Hutton, TOMCAST, mildew, blossom-drop risk
   today.ts       ranked daily agenda (UI + notification digest)
   journal.ts     harvest totals vs. expected yields
+  seeds.ts       seed box, germination & seed life, seeds/plants shopping list
   water.ts       FAO-56 water balance, canopy cover, crop-specific refill points, sensors
   growth.ts      thermal-time development & weather risk alerts
   schedule.ts    frost-date seasons, planting timelines, "plant now"

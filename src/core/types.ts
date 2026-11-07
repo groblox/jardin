@@ -156,11 +156,25 @@ export interface NotifySettings {
   publishSensors: boolean;
 }
 
+/** A seed packet in the seed box. */
+export interface SeedPacket {
+  id: string;
+  plantId: string;
+  variety?: string;
+  /** Year the seed was packed for (printed on the packet) or bought. */
+  year?: number;
+  /** Rough amount left. */
+  amount?: 'full' | 'half' | 'low' | 'empty';
+  note?: string;
+}
+
 export interface Garden {
   version: 1;
   site: Site;
   beds: Bed[];
   journal: JournalEntry[];
+  /** Seed box (added in v3; `migrateGarden` fills it in for older saves). */
+  seeds?: SeedPacket[];
   notify: NotifySettings;
   updatedAt: string;
 }

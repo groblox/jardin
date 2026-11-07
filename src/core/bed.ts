@@ -30,6 +30,13 @@ const activeTogether = (a: BedPlanting, b: BedPlanting, site: Site) => {
   return x.start < y.end && y.start < x.end;
 };
 
+/** Plantings whose squares no longer fit inside the bed (e.g. after the bed was made smaller). */
+export function plantingsOutside(bed: Bed): BedPlanting[] {
+  const w = Math.round(bed.widthFt);
+  const h = Math.round(bed.lengthFt);
+  return bed.plantings.filter((pl) => PLANT_BY_ID[pl.plantId] && cellsOf(pl).some(([c, r]) => c < 0 || r < 0 || c >= w || r >= h));
+}
+
 /**
  * Checks for a season's plantings: companions that grow side by side at the same time,
  * squares too shady for the crop, tall crops shading sun-lovers, and crop rotation.
@@ -38,6 +45,11 @@ export function bedWarnings(bed: Bed, site: Site, sunAt?: (col: number, row: num
   const out: Warning[] = [];
   const list = bed.plantings.filter((p) => PLANT_BY_ID[p.plantId] && (season == null || p.season === season));
   const [sx, sy] = shadowDirection(site);
+  const outside = plantingsOutside(bed).filter((p) => season == null || p.season === season);
+  if (outside.length) {
+    const names = [...new Set(outside.map((p) => PLANT_BY_ID[p.plantId].name))].join(', ');
+    out.push({ level: 'bad', message: `${outside.length} planting${outside.length > 1 ? 's' : ''} (${names}) fall outside the ${Math.round(bed.widthFt)}×${Math.round(bed.lengthFt)} ft bed — enlarge it again or remove them` });
+  }
 
   for (const pl of list) {
     const plant = PLANT_BY_ID[pl.plantId];

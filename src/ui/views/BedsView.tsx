@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import type { Bed, BedPlanting, JournalEntry, NutrientLevel, SoilType } from '../../core/types.ts';
 import { useGarden } from '../store.tsx';
 import { PLANTS, PLANT_BY_ID, type PlantType } from '../../core/plants.ts';
-import { bedSummary, bedWarnings, plantCount } from '../../core/bed.ts';
-import { followOns, occupancyAt, plantingInterval, scheduleSlot, squareHistory, cellsOf } from '../../core/succession.ts';
-import { planningYear, seasonFor } from '../../core/schedule.ts';
+import { bedSummary, bedWarnings, plantCount, plantingsOutside } from '../../core/bed.ts';
+import { followOns, occupancyAt, plantingInterval, scheduleSlot, squareHistory, cellsOf, nextSuccession } from '../../core/succession.ts';
+import { planningYear, plantNow, seasonFor } from '../../core/schedule.ts';
 import { compostNeeded, soilAdvice } from '../../core/soil.ts';
 import { sampleMap } from '../../core/placement.ts';
 import { SOILS, stageAt } from '../../core/water.ts';
@@ -16,6 +16,19 @@ import { Field, NumberInput, Status } from '../components/Field.tsx';
 import { Meter } from '../components/Chart.tsx';
 
 type Brush = { kind: 'plant'; plant: PlantType } | { kind: 'erase' } | null;
+type PaletteFilter = 'all' | 'now' | 'sun' | 'cool' | 'warm';
+const FILTERS: { id: PaletteFilter; label: string; title: string }[] = [
+  { id: 'all', label: 'All', title: 'Every crop' },
+  { id: 'now', label: 'Plant now', title: 'In a sowing or planting window today' },
+  { id: 'sun', label: 'Fits sun', title: 'Gets enough sun in this bed' },
+  { id: 'cool', label: 'Cool', title: 'Cool-season crops' },
+  { id: 'warm', label: 'Warm', title: 'Warm-season crops' },
+];
+const cellsOfSpan = (c: number, r: number, span: number): [number, number][] => {
+  const out: [number, number][] = [];
+  for (let dr = 0; dr < span; dr++) for (let dc = 0; dc < span; dc++) out.push([c + dc, r + dr]);
+  return out;
+};
 type Sel = { kind: 'square'; col: number; row: number; plantingId?: string } | null;
 
 const DAY = 86400000;
@@ -36,6 +49,7 @@ export function BedsView() {
   const [sel, setSel] = useState<Sel>(null);
   const [query, setQuery] = useState('');
   const [method, setMethod] = useState<'auto' | 'direct' | 'transplant'>('auto');
+  const [filter, setFilter] = useState<PaletteFilter>('all');
   const [showSun, setShowSun] = useState(true);
   const [toast, setToast] = useState<{ tone: 'good' | 'warning' | 'critical'; text: string } | null>(null);
   useEffect(() => {
@@ -43,8 +57,22 @@ export function BedsView() {
     const t = setTimeout(() => setToast(null), 5000);
     return () => clearTimeout(t);
   }, [toast]);
+  const nowIds = useMemo(() => new Set(plantNow(site, today).map((x) => x.plant.id)), [site, today]);
+  const stroke = useRef<{ visited: Set<string>; placed: { start: Date; text: string }[]; skipped: number; failed: string | null; erased: number } | null>(null);
 
-  const updateBed = (fn: (b: Bed) => Bed) => bed && update((g) => ({ ...g, beds: g.beds.map((b) => (b.id === bed.id ? fn(b) : b)) }));
+  // Leaves the garden untouched (no undo step, no save) when the bed function returns the same bed.
+  const updateBed = (fn: (b: Bed) => Bed) =>
+    bed &&
+    update((g) => {
+      let changed = false;
+      const beds = g.beds.map((b) => {
+        if (b.id !== bed.id) return b;
+        const nb = fn(b);
+        if (nb !== b) changed = true;
+        return nb;
+      });
+      return changed ? { ...g, beds } : g;
+    });
 
   const sunAt = useMemo(() => {
     const m = sun.season;
@@ -77,37 +105,128 @@ export function BedsView() {
       .sort((a, b) => a.iv.start.getTime() - b.iv.start.getTime())[0];
   const countIn = (c: number, r: number) => seasonPlantings.filter((p) => cellsOf(p).some(([cc, rr]) => cc === c && rr === r)).length;
 
-  const place = (plant: PlantType, c: number, r: number) => {
+  type PlaceResult = { ok: true; start: Date; before?: string; window: number } | { ok: false; reason: string } | { skipped: true };
+  /**
+   * Plan `plant` in square (c, r) against the latest bed state (so several placements in one drag see
+   * each other). When `continuing` a drag, busy squares are skipped instead of queued after the crop.
+   */
+  const place = (plant: PlantType, c: number, r: number, continuing = false): PlaceResult => {
     const m: 'direct' | 'transplant' = method === 'auto' ? (plant.startIndoorsWeeks != null || (!plant.directSow && plant.transplantWeeks != null) ? 'transplant' : 'direct') : method;
     const earliest = view > today ? view : today > rangeStart ? today : undefined;
-    const res = scheduleSlot(bed, site, plant, m, c, r, season, { earliest });
-    if (!res.ok) {
-      setToast({ tone: 'warning', text: res.reason });
-      return;
-    }
-    const pl: BedPlanting = { id: uid('pl'), plantId: plant.id, col: c, row: r, method: m, season, plannedOn: isoDate(res.start) };
-    updateBed((b) => ({ ...b, plantings: [...b.plantings, pl] }));
-    const before = squareHistory(bed, site, c, r).filter((x) => x.iv.end <= res.start && x.pl.season === season).pop();
-    setToast({ tone: 'good', text: `${plant.name} planned for ${fmtDate(res.start)}${before ? ` after ${before.plant.name}` : ''}${res.window > 0 ? ' (later window)' : ''}` });
-    if (Math.abs(res.start.getTime() - view.getTime()) > 30 * DAY && res.start > view) setView(res.start);
+    let out: PlaceResult = { skipped: true };
+    updateBed((b) => {
+      if (continuing && cellsOfSpan(c, r, plant.span).some(([cc, rr]) => occupancyAt(b, site, view)[rr * w + cc])) return b;
+      const res = scheduleSlot(b, site, plant, m, c, r, season, { earliest });
+      if (!res.ok) {
+        out = res;
+        return b;
+      }
+      const before = squareHistory(b, site, c, r).filter((x) => x.iv.end <= res.start && x.pl.season === season).pop();
+      out = { ok: true, start: res.start, before: before?.plant.name, window: res.window };
+      const pl: BedPlanting = { id: uid('pl'), plantId: plant.id, col: c, row: r, method: m, season, plannedOn: isoDate(res.start) };
+      return { ...b, plantings: [...b.plantings, pl] };
+    });
+    return out;
   };
 
-  const clickCell = (c: number, r: number) => {
+  const erase = (c: number, r: number): boolean => {
+    let hit = false;
+    updateBed((b) => {
+      const id = occupancyAt(b, site, view)[r * w + c] ??
+        b.plantings
+          .filter((p) => p.season === season && cellsOf(p).some(([cc, rr]) => cc === c && rr === r))
+          .map((p) => ({ p, iv: plantingInterval(p, site) }))
+          .filter((x) => x.iv.start > view)
+          .sort((a, b2) => a.iv.start.getTime() - b2.iv.start.getTime())[0]?.p.id;
+      if (!id) return b;
+      hit = true;
+      return { ...b, plantings: b.plantings.filter((p) => p.id !== id) };
+    });
+    return hit;
+  };
+
+  // One brush stroke = a click or a drag across squares; summarised in a single toast.
+  const strokeCell = (c: number, r: number, continuing: boolean) => {
+    const s = stroke.current;
+    if (!s || !brush) return;
+    const key = `${c},${r}`;
+    if (s.visited.has(key)) return;
+    s.visited.add(key);
+    if (brush.kind === 'erase') {
+      if (erase(c, r)) s.erased++;
+      return;
+    }
+    const res = place(brush.plant, c, r, continuing);
+    if ('skipped' in res) s.skipped++;
+    else if (!res.ok) s.failed = res.reason;
+    else {
+      s.placed.push({ start: res.start, text: `${brush.plant.name} planned for ${fmtDate(res.start)}${res.before ? ` after ${res.before}` : ''}${res.window > 0 ? ' (later window)' : ''}` });
+    }
+  };
+  const endStroke = () => {
+    const s = stroke.current;
+    stroke.current = null;
+    if (!s || !brush) return;
+    if (brush.kind === 'erase') return;
+    if (!s.placed.length) {
+      if (s.failed) setToast({ tone: 'warning', text: s.failed });
+      else if (s.skipped) setToast({ tone: 'warning', text: 'Those squares are busy on this date — click one square to queue a crop after what’s there' });
+      return;
+    }
+    const first = s.placed.reduce((a, x) => (x.start < a ? x.start : a), s.placed[0].start);
+    // Only toast once the stroke is over: a toast appearing mid-drag would shift the grid under the pointer.
+    if (s.placed.length > 1 || s.skipped)
+      setToast({ tone: 'good', text: `${brush.plant.name} planned in ${s.placed.length} square${s.placed.length > 1 ? 's' : ''} from ${fmtDate(first)}${s.skipped ? ` · skipped ${s.skipped} busy` : ''}` });
+    else setToast({ tone: 'good', text: s.placed[0].text });
+    if (Math.abs(first.getTime() - view.getTime()) > 30 * DAY && first > view) setView(first);
+  };
+  const beginStroke = (c: number, r: number) => {
+    stroke.current = { visited: new Set(), placed: [], skipped: 0, failed: null, erased: 0 };
+    strokeCell(c, r, false);
+  };
+  const cellAt = (x: number, y: number) => {
+    const el = (document.elementFromPoint(x, y) as HTMLElement | null)?.closest<HTMLElement>('[data-cell]');
+    return el ? { c: Number(el.dataset.c), r: Number(el.dataset.r) } : null;
+  };
+  const onGridPointerDown = (e: ReactPointerEvent) => {
+    if (!brush || e.button > 0) return;
+    const cell = cellAt(e.clientX, e.clientY);
+    if (!cell) return;
+    e.preventDefault();
+    beginStroke(cell.c, cell.r);
+    const move = (ev: PointerEvent) => {
+      const at = cellAt(ev.clientX, ev.clientY);
+      if (at) strokeCell(at.c, at.r, true);
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      endStroke();
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+  };
+
+  const clickCell = (c: number, r: number, viaKeyboard: boolean) => {
+    if (brush) {
+      // Pointer strokes are handled on pointerdown; keyboard activation paints one square.
+      if (viaKeyboard) {
+        beginStroke(c, r);
+        endStroke();
+      }
+      return;
+    }
     const id = occ[r * w + c];
-    if (brush?.kind === 'erase') {
-      const target = id ?? nextIn(c, r)?.p.id;
-      if (target) updateBed((b) => ({ ...b, plantings: b.plantings.filter((p) => p.id !== target) }));
-      return;
-    }
-    if (brush?.kind === 'plant') {
-      place(brush.plant, c, r);
-      return;
-    }
     setSel({ kind: 'square', col: c, row: r, plantingId: id ?? nextIn(c, r)?.p.id });
   };
 
-  const filtered = PLANTS.filter((p) => p.name.toLowerCase().includes(query.toLowerCase()) || p.family.toLowerCase().includes(query.toLowerCase()));
   const bedSun = bed.analysis?.sunHours;
+  const q = query.toLowerCase();
+  const filtered = PLANTS.filter((p) => !q || p.name.toLowerCase().includes(q) || p.family.toLowerCase().includes(q)).filter((p) =>
+    filter === 'now' ? nowIds.has(p.id) : filter === 'sun' ? bedSun == null || bedSun >= p.minSunHours : filter === 'cool' || filter === 'warm' ? p.season === filter : true,
+  );
   const span = rangeEnd.getTime() - rangeStart.getTime();
 
   return (
@@ -137,8 +256,14 @@ export function BedsView() {
               <button key={m} className={method === m ? 'active' : ''} onClick={() => setMethod(m)}>{m === 'auto' ? 'Auto' : m === 'direct' ? 'Sow' : 'Transplant'}</button>
             ))}
           </div>
+          <div className="chips" role="group" aria-label="Filter plants">
+            {FILTERS.map((f) => (
+              <button key={f.id} className={`chip ${filter === f.id ? 'active' : ''}`} aria-pressed={filter === f.id} title={f.title} onClick={() => setFilter(f.id)}>{f.label}</button>
+            ))}
+          </div>
           <button className={`palette-item erase ${brush?.kind === 'erase' ? 'active' : ''}`} onClick={() => setBrush(brush?.kind === 'erase' ? null : { kind: 'erase' })}>⌫ Eraser</button>
           <div className="palette-list">
+            {!filtered.length && <p className="muted small">{filter === 'now' ? 'Nothing is in its planting window today.' : 'No plants match.'}</p>}
             {filtered.map((p) => {
               const fits = bedSun == null || bedSun >= p.minSunHours;
               return (
@@ -167,12 +292,12 @@ export function BedsView() {
             <input type="range" min={0} max={Math.round(span / DAY)} value={Math.round((view.getTime() - rangeStart.getTime()) / DAY)} onChange={(e) => setView(addDays(rangeStart, +e.target.value))} aria-label="Date shown" className="full" />
             <div className="row between small muted"><span>{fmtDate(rangeStart)}</span><span>Last frost {fmtDate(s.lastFrost)}</span><span>First frost {fmtDate(s.firstFrost)}</span><span>{fmtDate(rangeEnd)}</span></div>
             <div className="muted small">
-              {brush?.kind === 'plant' ? `Click squares to plan ${brush.plant.name}. Busy squares are scheduled after the current crop.` : brush?.kind === 'erase' ? 'Click plantings to remove them from the plan' : 'Pick a plant and click squares, or click a square to see its history and what can follow.'}
+              {brush?.kind === 'plant' ? `Click or drag across squares to plan ${brush.plant.name}. Clicking a busy square queues it after the current crop; dragging skips busy squares.` : brush?.kind === 'erase' ? 'Click or drag across plantings to remove them from the plan.' : 'Pick a plant and click or drag across squares, or click a square to see its history and what can follow.'}
             </div>
           </div>
           {toast && <div className="toast" role="status"><Status tone={toast.tone}>{toast.text}</Status></div>}
 
-          <div className="sfg" style={{ gridTemplateColumns: `repeat(${w}, minmax(44px, 72px))` }} role="grid" aria-label={`${bed.name} square-foot grid`}>
+          <div className={`sfg ${brush ? 'painting' : ''}`} style={{ gridTemplateColumns: `repeat(${w}, minmax(44px, 72px))` }} role="grid" aria-label={`${bed.name} square-foot grid`} onPointerDown={onGridPointerDown}>
             {Array.from({ length: h }).flatMap((_, r) =>
               Array.from({ length: w }).map((_, c) => {
                 const id = occ[r * w + c];
@@ -191,8 +316,9 @@ export function BedsView() {
                     role="gridcell"
                     className={`sq ${pl ? 'filled' : ''} ${isSel ? 'selected' : ''} ${pl && !isAnchor ? 'cont' : ''} ${pl && !pl.plantedOn ? 'is-planned' : ''}`}
                     style={showSun && sunH != null ? { background: rampCss((sunH / SUN_SCALE_MAX) * 0.55) } : undefined}
-                    onClick={() => clickCell(c, r)}
-                    title={`${plant ? plant.name + (pl!.plantedOn ? ' (planted ' + fmtDate(pl!.plantedOn) + ')' : ' (planned)') : nxt ? 'Next: ' + nxt.p.plantId + ' ' + fmtDate(nxt.iv.start) : 'Empty'}${sunH != null ? ' · ' + sunH.toFixed(1) + ' h sun' : ''}`}
+                    data-cell="" data-c={c} data-r={r}
+                    onClick={(e) => clickCell(c, r, e.detail === 0)}
+                    title={`${plant ? plant.name + (pl!.plantedOn ? ' (planted ' + fmtDate(pl!.plantedOn) + ')' : ' (planned)') : nxt ? 'Next: ' + (PLANT_BY_ID[nxt.p.plantId]?.name ?? nxt.p.plantId) + ' ' + fmtDate(nxt.iv.start) : 'Empty'}${sunH != null ? ' · ' + sunH.toFixed(1) + ' h sun' : ''}`}
                   >
                     {plant && isAnchor && (
                       <>
@@ -238,7 +364,7 @@ export function BedsView() {
               onSelect={(id) => setSel({ ...sel, plantingId: id })}
               onClose={() => setSel(null)}
               updateBed={updateBed}
-              onPlanned={(text) => setToast({ tone: 'good', text })} />
+              onPlanned={(text) => setToast(text.startsWith('⚠ ') ? { tone: 'warning', text: text.slice(2) } : { tone: 'good', text })} />
           ) : (
             <BedPanel bed={bed} season={season} view={view} summary={summary} updateBed={updateBed} />
           )}
@@ -341,7 +467,7 @@ function SquarePanel({ bed, col, row, selectedId, season, onSelect, onClose, upd
           ))}
         </ul>
       </section>
-      {pl && <PlantingPanel bed={bed} pl={pl} updateBed={updateBed} />}
+      {pl && <PlantingPanel bed={bed} pl={pl} updateBed={updateBed} onPlanned={onPlanned} />}
       {last && suggestions.length > 0 && (
         <section className="card">
           <h4>Plant after {PLANT_BY_ID[last.plantId].name} ({fmtDate(plantingInterval(last, site).end)})</h4>
@@ -368,7 +494,7 @@ function SquarePanel({ bed, col, row, selectedId, season, onSelect, onClose, upd
   );
 }
 
-function PlantingPanel({ bed, pl, updateBed }: { bed: Bed; pl: BedPlanting; updateBed: (fn: (b: Bed) => Bed) => void }) {
+function PlantingPanel({ bed, pl, updateBed, onPlanned }: { bed: Bed; pl: BedPlanting; updateBed: (fn: (b: Bed) => Bed) => void; onPlanned: (t: string) => void }) {
   const { garden, update } = useGarden();
   const site = garden.site;
   const plant = PLANT_BY_ID[pl.plantId];
@@ -414,6 +540,15 @@ function PlantingPanel({ bed, pl, updateBed }: { bed: Bed; pl: BedPlanting; upda
       <div className="row gap wrap">
         {!pl.plantedOn && <button className="primary" onClick={() => change((p) => ({ ...p, plantedOn: todayIso }))}>Planted today</button>}
         {pl.plantedOn && !pl.removedOn && <button onClick={() => change((p) => ({ ...p, removedOn: todayIso }))}>Pulled today</button>}
+        {!plant.perennial && (
+          <button title={`Plan another ${plant.name} sowing ${plant.successionDays ?? 14} days after the latest one, in the nearest free square`} onClick={() => {
+            const res = nextSuccession(bed, site, pl);
+            if (!res.ok) return onPlanned(`⚠ ${res.reason}`);
+            const np: BedPlanting = { id: uid('pl'), plantId: plant.id, col: res.col, row: res.row, method: pl.method, season: pl.season, plannedOn: isoDate(res.start), count: pl.count };
+            updateBed((b) => ({ ...b, plantings: [...b.plantings, np] }));
+            onPlanned(`Next ${plant.name} sowing planned for ${fmtDate(res.start)} in square ${String.fromCharCode(65 + res.col)}${res.row + 1}`);
+          }}>+ Succession <span className="muted small">every {plant.successionDays ?? 14} d</span></button>
+        )}
       </div>
       {pl.plantedOn && !pl.removedOn && (
         <>
@@ -446,6 +581,7 @@ function BedPanel({ bed, season, view, summary, updateBed }: { bed: Bed; season:
   const { garden } = useGarden();
   const soil = soilAdvice(bed, garden.site, season);
   const compost = compostNeeded(bed, 1);
+  const outside = plantingsOutside(bed);
   const [ph, setPh] = useState(soil.test?.ph ?? 6.5);
   const [om, setOm] = useState<number | undefined>(soil.test?.organicMatterPct);
   const [npk, setNpk] = useState<{ n?: NutrientLevel; p?: NutrientLevel; k?: NutrientLevel }>({ n: soil.test?.n, p: soil.test?.p, k: soil.test?.k });
@@ -467,8 +603,8 @@ function BedPanel({ bed, season, view, summary, updateBed }: { bed: Bed; season:
         <div className="grid2">
           <Field label="Name"><input value={bed.name} onChange={(e) => updateBed((b) => ({ ...b, name: e.target.value }))} /></Field>
           <Field label="Soil depth"><NumberInput value={bed.soilDepthIn} min={4} max={36} suffix="in" onChange={(v) => updateBed((b) => ({ ...b, soilDepthIn: v }))} /></Field>
-          <Field label="Width"><NumberInput value={bed.widthFt} min={1} max={20} suffix="ft" onChange={(v) => updateBed((b) => ({ ...b, widthFt: Math.round(v), plantings: b.plantings.filter((p) => p.col < Math.round(v)) }))} /></Field>
-          <Field label="Length"><NumberInput value={bed.lengthFt} min={1} max={40} suffix="ft" onChange={(v) => updateBed((b) => ({ ...b, lengthFt: Math.round(v), plantings: b.plantings.filter((p) => p.row < Math.round(v)) }))} /></Field>
+          <Field label="Width"><NumberInput commitOnBlur value={bed.widthFt} min={1} max={20} suffix="ft" onChange={(v) => updateBed((b) => ({ ...b, widthFt: Math.round(v) }))} /></Field>
+          <Field label="Length"><NumberInput commitOnBlur value={bed.lengthFt} min={1} max={40} suffix="ft" onChange={(v) => updateBed((b) => ({ ...b, lengthFt: Math.round(v) }))} /></Field>
         </div>
         <Field label="Soil">
           <select value={bed.soil} onChange={(e) => updateBed((b) => ({ ...b, soil: e.target.value as SoilType }))}>
@@ -476,6 +612,15 @@ function BedPanel({ bed, season, view, summary, updateBed }: { bed: Bed; season:
           </select>
         </Field>
         <label className="row gap"><input type="checkbox" checked={bed.mulched} onChange={(e) => updateBed((b) => ({ ...b, mulched: e.target.checked }))} /> Mulched</label>
+        {outside.length > 0 && (
+          <div className="card inset">
+            <Status tone="critical">{outside.length} planting{outside.length > 1 ? 's' : ''} no longer fit this {Math.round(bed.widthFt)}×{Math.round(bed.lengthFt)} ft bed.</Status>
+            <div className="row gap wrap">
+              <button className="small danger" onClick={() => updateBed((b) => ({ ...b, plantings: b.plantings.filter((p) => !outside.some((o) => o.id === p.id)) }))}>Remove them</button>
+              <span className="muted small">or make the bed bigger again to keep them.</span>
+            </div>
+          </div>
+        )}
         {bed.analysis && <p>Season sun: <b>{bed.analysis.sunHours.toFixed(1)} h/day</b> · DLI {bed.analysis.dli.toFixed(0)}</p>}
         <h4>On {fmtDate(view)}</h4>
         <Meter value={summary.used} max={summary.area} label="Squares in use" />

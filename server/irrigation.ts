@@ -78,18 +78,38 @@ async function finishRun(run: ActiveRun, endMs: number, note?: string) {
   await save();
 }
 
-export async function startRun(bedId: string, minutes: number, source: 'manual' | 'auto' = 'manual') {
+const badRequest = (msg: string) => Object.assign(new Error(msg), { status: 400 });
+
+/** Minutes from an API body: must be a positive, finite number (strings like "10" are accepted). */
+export function parseMinutes(v: unknown): number {
+  const n = typeof v === 'string' && v.trim() !== '' ? Number(v) : typeof v === 'number' ? v : NaN;
+  if (!Number.isFinite(n) || n <= 0) throw badRequest('minutes must be a positive number');
+  return n;
+}
+
+export async function startRun(bedId: string, minutes: unknown, source: 'manual' | 'auto' = 'manual') {
   const bed = getGarden().beds.find((b) => b.id === bedId);
-  if (!bed) throw new Error('Unknown bed');
+  if (!bed) throw Object.assign(new Error('Unknown bed'), { status: 404 });
   const entity = bed.irrigation.valveEntity;
-  if (!entity) throw new Error('No valve entity configured for this bed');
-  if (state.active.some((r) => r.bedId === bedId)) throw new Error('Already watering');
-  const mins = Math.min(source === 'auto' ? bed.irrigation.maxMinutes : MAX_MANUAL_MIN, Math.max(0.5, minutes));
-  await setSwitch(entity, true);
+  if (!entity) throw badRequest('No valve entity configured for this bed');
+  if (state.active.some((r) => r.bedId === bedId)) throw Object.assign(new Error('Already watering'), { status: 409 });
+  const cap = source === 'auto' ? bed.irrigation.maxMinutes : MAX_MANUAL_MIN;
+  const mins = Math.min(Number.isFinite(cap) && cap > 0 ? cap : MAX_MANUAL_MIN, Math.max(0.5, parseMinutes(minutes)));
+  // Build and persist the run *before* opening the valve: if anything after this fails,
+  // the shut-off timer still knows about it and will close the valve.
   const start = new Date();
   const run: ActiveRun = { bedId, entity, start: start.toISOString(), endsAt: new Date(start.getTime() + mins * 60000).toISOString(), minutes: mins, source };
   state.active.push(run);
   await save();
+  try {
+    await setSwitch(entity, true);
+  } catch (e) {
+    state.active = state.active.filter((r) => r !== run);
+    await save();
+    // The open may have reached the valve even though the call failed: close it to be safe.
+    await setSwitch(entity, false).catch(() => {});
+    throw e;
+  }
   setTimeout(() => enforceShutoff().catch(console.error), mins * 60000 + 500);
   return run;
 }
@@ -99,10 +119,12 @@ export async function stopRun(bedId: string) {
   if (run) await finishRun(run, Date.now(), 'stopped early');
 }
 
-export async function logManual(bedId: string, minutes: number, note?: string) {
+export async function logManual(bedId: string, minutes: unknown, note?: unknown) {
   const bed = getGarden().beds.find((b) => b.id === bedId);
-  if (!bed) throw new Error('Unknown bed');
-  state.events.push({ id: uid('irr'), bedId, start: new Date().toISOString(), minutes, depthMm: depthForMinutes(bed, minutes), source: 'manual', note: note ?? 'logged by hand' });
+  if (!bed) throw Object.assign(new Error('Unknown bed'), { status: 404 });
+  const mins = Math.min(24 * 60, parseMinutes(minutes));
+  const text = typeof note === 'string' && note.trim() ? note.trim().slice(0, 200) : 'logged by hand';
+  state.events.push({ id: uid('irr'), bedId, start: new Date().toISOString(), minutes: mins, depthMm: depthForMinutes(bed, mins), source: 'manual', note: text });
   await save();
 }
 
@@ -131,9 +153,12 @@ async function autoTick() {
     const { windowStartHour: ws, windowEndHour: we } = bed.irrigation;
     const inWindow = ws <= we ? hour >= ws && hour < we : hour >= ws || hour < we;
     if (!inWindow || state.lastAutoDate[bed.id] === today) continue;
-    state.lastAutoDate[bed.id] = today;
-    const decide = (action: Decision['action'], message: string) =>
-      (state.decisions[bed.id] = { bedId: bed.id, at: new Date().toISOString(), action, message });
+    // A day counts as handled once a decision is made; errors (HA unreachable…) retry on the
+    // next tick while the window is still open.
+    const decide = (action: Decision['action'], message: string) => {
+      state.decisions[bed.id] = { bedId: bed.id, at: new Date().toISOString(), action, message };
+      if (action !== 'error') state.lastAutoDate[bed.id] = today;
+    };
 
     const next24 = ev.weather.daily.filter((d) => d.date >= today).slice(0, 2);
     const rainIn = mmToIn(next24.reduce((s, d) => s + d.precipMm * ((d.precipProb ?? 100) / 100), 0));

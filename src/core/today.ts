@@ -3,7 +3,7 @@
 import type { Garden, IrrigationEvent, WeatherBundle } from './types.ts';
 import { PLANT_BY_ID } from './plants.ts';
 import { evaluateBed } from './water.ts';
-import { gardenTasks, TASK_LABEL } from './tasks.ts';
+import { gardenTasks, TASK_LABEL, type Task } from './tasks.ts';
 import { planningYear, plantNow } from './schedule.ts';
 import { seasonOfDate } from './succession.ts';
 import { simulateGrowth, frostThresholdC } from './growth.ts';
@@ -187,6 +187,31 @@ export function buildAgenda({ garden, weather, season, events, readings, activeR
     });
 
   return items.sort((a, b) => a.priority - b.priority || order(a.category) - order(b.category));
+}
+
+/**
+ * The look-ahead: scheduled tasks (incl. harvest windows opening) after the agenda's 3-day horizon,
+ * up to `days` ahead — "what's coming in the next two weeks".
+ */
+export function upcomingTasks(garden: Garden, todayIso: string, days = 14): Task[] {
+  const today = parseIso(todayIso);
+  const from = isoDate(addDays(today, 4));
+  const to = isoDate(addDays(today, days));
+  const years = [...new Set([seasonOfDate(garden.site, today), planningYear(garden.site, today)])];
+  const seen = new Set<string>();
+  const out: Task[] = [];
+  for (const y of years)
+    for (const t of gardenTasks(garden, y)) {
+      if (t.done || t.date < from || t.date > to) continue;
+      if (t.kind === 'harvest' && PLANT_BY_ID[t.plantId]?.perennial) continue;
+      const journaled = garden.journal.some((e) => e.text === t.title && e.date >= isoDate(addDays(parseIso(t.date), -14)));
+      if ((t.kind === 'side-dress' || t.kind === 'prep' || t.kind === 'perennial-care') && journaled) continue;
+      const k = `${t.kind}|${t.bedId}|${t.plantId}|${t.date}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(t);
+    }
+  return out.sort((a, b) => a.date.localeCompare(b.date) || a.title.localeCompare(b.title));
 }
 
 const ORDER: AgendaCategory[] = ['frost', 'heat', 'water', 'harvest', 'task', 'disease', 'pest', 'soil', 'plan'];

@@ -1,6 +1,6 @@
 # Jardin — Engineering Handoff
 
-_Last updated: 2026-11-05 · Branch `claude/jardin-garden-app` (not yet merged to `main`)_
+_Last updated: 2026-11-07 (round 3: code review + quality-of-life) · Branch `claude/jardin-garden-app` (not yet merged to `main`)_
 
 Jardin is a garden planning **and** maintenance app: 3D sun/shade analysis of a property, square-foot-gardening (SFG) bed planning with succession and rotation, weather-driven growth/water/pest/disease models, a daily agenda, and Home Assistant (HA) irrigation control and notifications.
 
@@ -13,12 +13,12 @@ This document is everything the next person (or session) needs to pick the work 
 | | |
 |---|---|
 | Repo | `groblox/jardin` · work is on **`claude/jardin-garden-app`**; `main` only has the initial commit |
-| Commits | `98b9b11` v1 planner · `26dc8ea` v2 maintenance features · (this handoff commit) |
-| Size | ~8.5k lines TypeScript (core ≈ 3k, UI ≈ 4k, server ≈ 0.7k), 41 unit tests in 6 files |
-| Health | `npm run typecheck` clean · `npm test` 41/41 pass · `npm run build` OK · fresh clone → `npm ci && npm run build && npm start` verified |
-| Verified in browser | Every tab via Playwright (light, dark, 390 px phone), no console errors; underlay/measure/calibrate; undo/redo; manual watering |
+| Commits | `98b9b11` v1 planner · `26dc8ea` v2 maintenance features · `ce35108` handoff · round-3 review & QoL commit (see §12) |
+| Size | ~9.1k lines (core ≈ 3.4k, UI ≈ 4.9k incl. CSS, server ≈ 0.8k) + 0.7k of tests; 60 unit tests in 8 files |
+| Health | `npm run typecheck` clean · `npm test` 60/60 pass · `npm run build` OK |
+| Verified in browser | Every tab via Playwright (light, dark, 390 px phone, no overflow), plus 21 scripted interaction checks for round 3 (drag-paint, resize, succession, filters, seed box, journal search, backup restore, two-device conflict/pick-up, flush on hide, bad irrigation input) and print media. Round 3 used **synthetic weather** (`scripts/fake-weather.ts`) because Open-Meteo was blocked from the sandbox |
 | Verified against fake HA | valve on/off, auto-watering decision, notify digest, sensor publishing (see §3.4) |
-| **Not** verified | A real Home Assistant; the Docker image; the HA add-on build/install; OSM/Overpass from a normal network |
+| **Not** verified | A real Home Assistant; the Docker image; the HA add-on build/install; OSM/Overpass from a normal network; round-3 UI against live Open-Meteo (archive-backed features — pest degree-days, Simulate, frost estimate — returned 500 in the sandbox); touch-screen drag-painting on a real phone |
 | In-flight design | "Survey my yard" — auto-import trees/buildings + photo-based height measurement (§9.1). User asked whether to build steps 1 + 2; **no answer yet** |
 
 ---
@@ -43,17 +43,17 @@ User preferences / environment notes:
 
 Tabs (in order): **Today · Site & sun · Beds · Plan · Water · Health · Forecast · Simulate · Journal · Settings**.
 
-- **Today** — ranked agenda (urgent / today / this week / when you can): frost & heat, watering (one-tap valve run), weather-adjusted harvest readiness, due tasks (one-tap complete), pest & disease alerts, soil jobs, "in season to plant now". Bed cards with soil-water meters. Quick journal note.
+- **Today** — ranked agenda (urgent / today / this week / when you can): frost & heat, watering (one-tap valve run), weather-adjusted harvest readiness, due tasks (one-tap complete), pest & disease alerts, soil jobs, "in season to plant now". Bed cards with soil-water meters. Quick journal note. **Coming up** card (tasks 4–14 days out, `upcomingTasks`). Degrades gracefully when weather fails (stand-in bundle, warning + Retry).
 - **Site & sun** — canvas map editor (buildings = prisms, trees = ellipsoid crowns, fences/hedges = thin walls with transmittance, beds). Overlays: sun-hours heatmap, clear-sky DLI heatmap, live shadows at a date/time, plain. Periods: frost-free season, solstices, equinox, whole year, a date. **Inspect sun** at any point (sun-path polar plot with obstruction skyline, day sun/shade strip, monthly sun vs. daylight). **Find best spots** for a bed of W×L. **Aerial photo underlay** + **Measure** tool that rescales the photo from a known length.
-- **Beds** — time-aware SFG grid: season selector + date scrubber; plantings occupy squares for intervals; clicking a square with a plant brush auto-schedules into the next free slot in that crop's planting window; square history; "plant after this" suggestions; per-bed season strip (mini Gantt); checks (companions active together, sun vs. need, tall-crop shading, rotation); planting panel (planned/planted/pulled dates, count, harvest logging); bed panel (dims, soil, mulch, summary, expected yield, soil tests with pH/lime/sulfur/compost advice).
-- **Plan** — season Gantt (indoors → in bed → harvest, plus planting-window underlines), task list (start indoors, harden off, prep squares, sow/transplant, side-dress, harvest) with Done actions, "growing now" table, "plant now", expected vs. logged harvest.
+- **Beds** — time-aware SFG grid: season selector + date scrubber; plantings occupy squares for intervals; clicking a square with a plant brush auto-schedules into the next free slot in that crop's planting window; **drag-to-paint / drag-to-erase** (one undo step, one summary toast; drags skip squares busy on the shown date); palette **filter chips** (all / plant now / fits sun / cool / warm); **+ Succession** on a planting (`nextSuccession`); square history; "plant after this" suggestions; per-bed season strip (mini Gantt); checks (companions active together, sun vs. need, tall-crop shading, rotation); planting panel (planned/planted/pulled dates, count, harvest logging); bed panel (dims, soil, mulch, summary, expected yield, soil tests with pH/lime/sulfur/compost advice).
+- **Plan** — season Gantt (indoors → in bed → harvest, plus planting-window underlines), **Seeds & plants list + seed box** (`SeedsPanel.tsx`, `core/seeds.ts`; copy as shopping list), task list (start indoors, harden off, prep squares, sow/transplant, side-dress, harvest) with Done actions, "growing now" table (rows grouped by sowing; plain-language stage labels), "plant now", expected vs. logged harvest. **Print plan** (print CSS hides chrome and editors).
 - **Water** — per-bed FAO-56 water balance (30 days back + 16 forecast), sensor history, recommendation (inches / gallons / minutes), Water now / Stop / Log hand watering, mode off/suggest/auto, HA entity pickers, sensor dry/wet calibration, flow/efficiency/window/max-run/rain-skip.
 - **Health** — degree-day pest timing with projected dates; disease pressure (late blight, TOMCAST early blight/Septoria, powdery & downy mildew, blossom drop); leaf-wetness chart; log sightings/treatments (a tomato treatment resets TOMCAST).
 - **Forecast** — 16-day table + temperature & water charts, frost/crop alerts, **per-bed sunlight forecast** (bed's modelled shading × forecast cloudiness).
 - **Simulate** — replay any of the last 15 years of archived weather against a bed's plan (incl. successions): harvest dates, frost/heat days, weekly water budget, total irrigation.
-- **Journal** — harvest/note/pest/disease/treatment/fertilize/amend/sow entries, filters, harvest totals vs. expected (lb), CSV export.
-- **Settings** — location (GPS), property size, map north, frost dates (+ estimate from 10 years of history), HA connection, notifications/sensor publishing, JSON import/export/reset.
-- Global: undo/redo (buttons + Ctrl/Cmd+Z, Ctrl+Shift+Z/Ctrl+Y), autosave, light/dark themes, phone layout.
+- **Journal** — harvest/note/pest/disease/treatment/fertilize/amend/sow entries, filters, **search across all seasons**, harvest totals vs. expected (lb), CSV export.
+- **Settings** — location (GPS), property size, map north, frost dates (+ estimate from 10 years of history), HA connection, notifications/sensor publishing, JSON import (migrated, confirmed, undoable)/export/reset, **Backups** list with restore (undoable).
+- Global: undo/redo (buttons + Ctrl/Cmd+Z, Ctrl+Shift+Z/Ctrl+Y), autosave with conflict detection and retry (§7), light/dark themes, phone layout, sticky header with sync banners.
 
 ---
 
@@ -73,6 +73,8 @@ npm test                          # vitest, 41 tests
 npm run typecheck                 # tsc --noEmit (TypeScript 7)
 ```
 Env vars: `PORT` (8787), `DATA_DIR` (./data), `HA_URL`, `HA_TOKEN`, `SUPERVISOR_TOKEN` (set automatically inside an HA add-on).
+
+Offline / sandbox: `node scripts/fake-weather.ts <DATA_DIR> [lat lon today]` writes a synthetic `weather-cache.json` the server falls back to when Open-Meteo fails (archive-backed features stay unavailable). In the cloud sandbox Node's `fetch` ignores `HTTPS_PROXY` unless run with `NODE_USE_ENV_PROXY=1`, and on 2026-11-07 the proxy refused `api.open-meteo.com` outright (403), so round 3 was verified on synthetic weather.
 
 ### 3.3 Modes
 - **Server mode** (normal): UI detects `/api/health`, stores data on the server.
@@ -102,6 +104,8 @@ Playwright is pre-installed in the cloud sandbox; ESM scripts must load it via `
 | `succession.test.ts` | slot scheduling after a crop, frost-bound refusal, fall window, date occupancy, removed crops stop using water, rotation, follow-ons, migration, soil advice/lime/sulfur/target pH |
 | `health.test.ts` | degree-day cutoffs, squash-vine-borer stages & ETA, host filtering, TOMCAST table, Hutton periods, treatment reset |
 | `today.test.ts` | agenda ordering (frost first), watering item, merged harvest items, digest, wet sensor suppresses watering |
+| `qol.test.ts` | irrigation events on the garden's calendar day (UTC offset), NaN events ignored, out-of-bounds plantings flagged, succession chain, seed needs (have/old/need/buy, counts, dates, text), seed migration, two-week look-ahead |
+| `server.test.ts` | corrupt JSON moved aside, backups snapshot/list/read/prune, irrigation: bad minutes never open the valve, numeric strings OK, caps, 404/400/409, hand-log validation (runs in demo mode with a temp `DATA_DIR`, fake timers) |
 
 ---
 
@@ -149,6 +153,7 @@ BedIrrigation { valveEntity?, moistureEntity?, sensorDry, sensorWet, flowGpm, ef
                 mode off|suggest|auto, windowStartHour, windowEndHour (end-exclusive, may wrap), maxMinutes, rainSkipIn }
 SoilTest { date, ph, organicMatterPct?, n?/p?/k? low|medium|high|very-high }
 JournalEntry { id, date, kind, bedId?, plantingId?, plantId?, qty?, unit?, text? }
+SeedPacket  { id, plantId, variety?, year?, amount? full|half|low|empty, note? }     Garden.seeds? (migrated to [])
 NotifySettings { service?, dailyDigest, digestHour, frostAlerts, publishSensors }
 IrrigationEvent { id, bedId, start ISO, minutes, depthMm, source manual|auto, note? }   (server-owned)
 WeatherBundle { lat, lon, timezone, utcOffsetSeconds, today, daily[], hourly?, fetchedAt }
@@ -156,7 +161,7 @@ WeatherBundle { lat, lon, timezone, utcOffsetSeconds, today, daily[], hourly?, f
 
 - `season` = the year of the spring last frost the planting belongs to (garlic planted in fall S is still season S in the scheduler; its interval runs into S+1).
 - `Bed.analysis` is written by the UI after the growing-season sun map is computed (with `history: false` so it doesn't pollute undo). The server uses it to scale ET for shaded beds.
-- `migrateGarden()` (`core/defaults.ts`) upgrades older saves: adds `journal`, `notify`, `soilTests`, and assigns `season` from `plantedOn` (via `seasonOfDate`) or the planning year. Run on load in both UI and server, and on every `PUT /api/garden`.
+- `migrateGarden()` (`core/defaults.ts`) upgrades older saves: adds `journal`, `seeds`, `notify`, `soilTests`, and assigns `season` from `plantedOn` (via `seasonOfDate`) or the planning year. Run on load in both UI and server, and on every `PUT /api/garden`.
 - `sampleGarden(today)` builds a demo: 80×100 ft lot, house/garage/oak/spruce/fences, Bed 1 planned for the planning season (incl. lettuce→beans succession, eggplant after last year's potatoes for a rotation warning, a soil test), and Bed 2 with fall crops planted **relative to today** so the Today/Health tabs have content in any month.
 
 ---
@@ -225,12 +230,21 @@ Season replay with ideal auto-irrigation (refill whenever the crop-specific refi
 
 ---
 
+### 6.13 `seeds.ts`
+`seedNeeds(garden, season)`: every planting in the season not yet planted or pulled, grouped by crop × how it starts — start indoors (transplant + `startIndoorsWeeks`), sow in bed, buy plants (transplant without indoor start, strawberry, mint), plant sets (potato, garlic). Plants = Σ `plantCount`. Seeds = ⌈plants ÷ germination × 1.25⌉, cells = ⌈plants × 1.25⌉. `by` = earliest start-indoors / sow / transplant date. Status from the freshest non-empty packet: have / old (age > `SEED_LIFE_YEARS`) / need / buy. Age adjusts germination: at the life limit ×0.85, past it ×0.5. `GERMINATION` and `SEED_LIFE_YEARS` are typical catalogue/extension figures. `shoppingListText` → plain text.
+
+### 6.14 Other round-3 helpers
+`util.localDateOf(iso, utcOffsetSeconds)` (calendar day in the garden's zone); `bed.plantingsOutside(bed)` (+ a `bad` warning in `bedWarnings`); `succession.nextSuccession(bed, site, pl)` (same crop `successionDays ?? 14` after the latest in its chain, nearest square whose slot starts within 7 days of that, else earliest); `today.upcomingTasks(garden, todayIso, days = 14)` (days 4…14, skips journaled side-dress/prep, perennial harvests).
+
 ## 7. UI notes (`src/ui/`)
 
+- **Save pipeline (round 3)** — `savedGarden` ref = the object last persisted/loaded (anything else is unsaved); `baseVersion` = server `updatedAt` it builds on. `persist()` chains one PUT at a time with `X-Jardin-Base`; success → new base, and re-saves if the garden changed meanwhile (incl. undo); network errors retry with backoff (4 s → 60 s); **409** → if only automatic writes are pending (`userEdits` false, e.g. bed sun `analysis` from two devices opened together) the server copy is loaded silently, otherwise a sticky banner offers *Load their version* / *Keep mine*. `visibilitychange`/`pagehide` flush pending edits (`keepalive` when the body < 60 KB); on return to the page and every 60 s an idle client compares `GET /api/garden/version` and reloads (undo history cleared, notice banner).
 - `store.tsx` — single context: garden, autosave (700 ms debounce), server probe, weather (1 h server cache), season weather, sensor readings (60 s), irrigation status (15 s), sun maps (two workers: selected period + always-on growing season), bed `analysis` caching, tab persistence (`localStorage jardin.tab`), **undo/redo** (80 snapshots, edits within 700 ms coalesced; bookkeeping outside React updaters because StrictMode double-invokes them).
 - `components/Chart.tsx` — generic SVG line/bar/stacked chart sized to its container (pixel-true text), hover crosshair + tooltip, legend for ≥ 2 series, reference lines, forecast band. `SunPath.tsx` — polar sun-path + skyline.
 - Colours follow the dataviz skill's validated reference palette (`--series-1..4` in fixed order), reserved status colours always paired with an icon + label (`components/Field.tsx` `Status`), and a single-hue amber ramp for sunlight magnitude with separate light/dark steps (`sunColors.ts`). Canvas reads CSS tokens at draw time; `useThemeVersion` redraws on theme change.
-- Views are self-contained files in `views/`. `SiteView.tsx` is the largest (canvas editor, tools, overlays, inspector, placement, measure, underlay).
+- Views are self-contained files in `views/` (`SeedsPanel.tsx` is used by Plan). `SiteView.tsx` is the largest (canvas editor, tools, overlays, inspector, placement, measure, underlay).
+- `NumberInput commitOnBlur` commits on blur/Enter (clamped) — used for bed width/length (Beds and Site), lat/lon and property size, so intermediate keystrokes ("1" on the way to "12") don't act.
+- Beds drag-painting: `pointerdown` on the grid starts a stroke; window `pointermove` + `elementFromPoint` → `[data-cell]`; each placement runs `scheduleSlot` inside the `update` callback against the latest bed (so a stroke sees its own placements); `.sfg.painting { touch-action: none }` while a brush is active; keyboard activation (`click` with `detail === 0`) paints one square. Toasts are fixed-position overlays (an in-flow toast shifted the grid under the pointer mid-drag).
 - Timezone: clock times show in the garden's time zone (`format.ts fmtTime(t, weather.timezone)`).
 
 ---
@@ -240,7 +254,9 @@ Season replay with ideal auto-irrigation (refill whenever the crop-specific refi
 | Route | Purpose |
 |---|---|
 | `GET /api/health` | probe |
-| `GET/PUT /api/garden` | load/save (validated, migrated) |
+| `GET/PUT /api/garden` | load/save (validated, migrated). PUT honours `X-Jardin-Base: <updatedAt>` → **409** `{conflict, updatedAt}` if someone saved since; snapshots before the first save of the day / before big deletions |
+| `GET /api/garden/version` | `{ updatedAt }` — cheap change check for idle clients |
+| `GET /api/backups`, `GET /api/backups/:name` | list (newest first) / read a snapshot from `DATA_DIR/backups` (20 kept) |
 | `GET /api/weather?lat&lon` | forecast bundle (1 h memory cache + disk fallback when Open-Meteo fails) |
 | `GET /api/season-weather?lat&lon` | YTD + forecast + normals (cached per day) |
 | `GET /api/archive?lat&lon&start&end` | historical daily weather (disk-cached per range) |
@@ -249,12 +265,12 @@ Season replay with ideal auto-irrigation (refill whenever the crop-specific refi
 | `GET /api/ha/status`, `PUT /api/ha/config` | mode/version; save URL + token (`data/secrets.json`) |
 | `GET /api/ha/entities`, `/api/ha/history?entity&hours`, `/api/ha/value?entity` | entity pickers, sensor history, live value |
 | `GET /api/irrigation`, `GET /api/irrigation/:bed/evaluate` | events/active runs/decisions; recommendation |
-| `POST /api/irrigation/:bed/run {minutes}`, `/stop`, `/log {minutes,note}` | valve control and manual log |
+| `POST /api/irrigation/:bed/run {minutes}`, `/stop`, `/log {minutes,note}` | valve control and manual log. `minutes` must be a positive number (numeric strings OK) → else 400 before any HA call; unknown bed 404, no valve 400, already running 409 |
 
 - **HA client** (`ha.ts`): modes `addon` (Supervisor at `http://supervisor/core`), `manual` (URL + long-lived token), `demo` (simulated). Valves: `switch`/`input_boolean` → `turn_on/off`, `valve` → `open_valve/close_valve`. `callService`, `setState` (POST `/api/states/<id>`).
-- **Irrigation controller** (`irrigation.ts`): active runs persisted in `data/irrigation.json`; shut-off enforced every 15 s and at start-up (a failed close is retried — the run stays active); manual runs capped at 120 min, auto at `maxMinutes`; auto mode runs once per local day inside the window, skips when not needed or when rain ≥ `rainSkipIn` is expected in ~24 h; decisions recorded per bed.
+- **Irrigation controller** (`irrigation.ts`): the run is recorded and persisted **before** the valve is opened (if the open fails, the record is dropped and a close is sent anyway); active runs persisted in `data/irrigation.json`; shut-off enforced every 15 s and at start-up (a failed close is retried — the run stays active); auto-mode errors don't consume the day (retried next tick inside the window); manual runs capped at 120 min, auto at `maxMinutes`; auto mode runs once per local day inside the window, skips when not needed or when rain ≥ `rainSkipIn` is expected in ~24 h; decisions recorded per bed.
 - **Agenda/notifications** (`agenda.ts`): every 5 min — digest once per day at `digestHour` (local), frost alert once per day after 15:00 when a frost item exists, publish `sensor.jardin_<bed-slug>_soil_water` (state %, attributes: recommendation, message, water_in, gallons, minutes, next_watering) and `sensor.jardin_todo_today` (count + item titles). No `notify.service` → `persistent_notification.create`.
-- **Files in `DATA_DIR`**: `garden.json`, `irrigation.json`, `notify.json`, `secrets.json` (HA token), `weather-cache.json`, `archive-*.json`. Writes are atomic (tmp + rename) and serialised per file.
+- **Files in `DATA_DIR`**: `garden.json`, `irrigation.json`, `notify.json`, `secrets.json` (HA token), `weather-cache.json`, `archive-*.json`, `backups/garden-<UTC yyyy-mm-dd-hh-mm>-<daily|big-change>.json`. Writes are atomic (tmp + rename) and serialised per file. A file that exists but isn't valid JSON is renamed `<name>.corrupt-<time>` and logged instead of being silently replaced by defaults.
 - Body limit 25 MB (photo underlays are stored as data URLs inside `garden.json`, downscaled to ≤ 2400 px JPEG on upload).
 
 **Security:** the standalone server has **no authentication**. Anyone who can reach the port can read the garden and run valves. Keep it on a trusted LAN, bind behind a reverse proxy with auth, or use the HA add-on (ingress is authenticated by HA).
@@ -296,13 +312,15 @@ Open questions for the user: build steps 1 + 2 now? Can they provide top-down + 
 1. **Merge/PR to `main`** (the add-on Dockerfile clones `main` by default; repo must be public or reachable from the HA host). Then actually build the add-on and the Docker image; consider publishing an image to GHCR and using `image:` in `jardin/config.yaml`.
 2. Run against the user's **real HA**; check `valve.*` domains, `input_boolean` helpers, `notify.mobile_app_*`, and published sensors on an HA dashboard.
 3. **Server auth** for standalone mode (token or basic auth; at minimum bind-address option).
-4. **Seed inventory & seed-starting quantities** (germination rate, seed age, cells to start = plants ÷ germination × safety).
+4. ~~Seed inventory & seed-starting quantities~~ — done in round 3 (§6.13). Next: seeds per packet (to say "1 packet" instead of a seed count), varieties with their own DTM, CSV import of a seed list.
 5. **Validate sunlight with an HA illuminance sensor** (lux > ~20–30 klx ≈ direct sun) vs. the model at that spot.
 6. Units toggle (metric), localisation of dates/numbers in notifications.
 7. More pests/diseases and southern-hemisphere pest data; regional biofix options.
 8. Per-square or per-crop watering zones (the model treats a bed as one zone).
 9. Fruit trees/berries/perennial beds; cover crops between seasons.
 10. Performance: sun-map worker recomputes on every site change — fine at ≤ 12k cells; consider incremental updates for large properties.
+11. From the round-3 app survey, not built yet: custom crops/varieties (every competitor has them), templates ("salad bed", "feed the family"), copy last season's plan forward (GrowVeg follow-on plans), journal photos, protection-adjusted dates (cold frame / row cover shifts windows), drag a planting along the season strip to move all its dates (Seedtime).
+12. Server tests cover store + irrigation; `agenda.ts`/HA publishing and the HTTP layer (`index.ts` routes, 409 path) are still untested in code (the 409 path was verified in the browser).
 
 ---
 
@@ -316,7 +334,8 @@ Open questions for the user: build steps 1 + 2 now? Can they provide top-down + 
 - **Sandbox network**: Overpass and USGS 3DEP (`elevation.nationalmap.gov`) were unreachable/502 from the cloud environment; S3 (canopy map) and Open-Meteo worked.
 - **TypeScript 7** (native compiler) is used for type-checking; Vite/esbuild transpile for the UI; Node strips types for the server. Keep syntax erasable.
 - Playwright in ESM scripts needs `createRequire` (see §3.5).
-- Fixed during development (regression-tested): shared array mutation when merging tasks; wet sensor still recommending water; StrictMode double-invoked undo; perennials shown as overdue harvests; missing accessible names on icon-only phone tabs.
+- Fixed during development (regression-tested): shared array mutation when merging tasks; wet sensor still recommending water; StrictMode double-invoked undo; perennials shown as overdue harvests; missing accessible names on icon-only phone tabs. Round 3: see §12.
+- Drag-painting disables touch scrolling over the grid while a plant/eraser brush is selected (tap the brush again to scroll freely) — intentional, same as other SFG apps.
 
 ---
 
@@ -335,3 +354,30 @@ jardin/    HA add-on: config.yaml · Dockerfile · DOCS.md
 tests/     solar · shade · garden · succession · health · today
 Dockerfile · repository.yaml · README.md · handoff.md
 ```
+
+---
+
+## 12. Round 3 — code review & quality of life (2026-11-07)
+
+Asked for: another round of code review and QoL, looking at other garden apps for ideas. Surveyed GrowVeg / Almanac planner (shopping list, two-week look-ahead reminders, follow-on plans, journal search, printing, seed inventory "coming soon"), Planter (Seed Box with packet year/amount, quick-plant and multi-select, plant filters by frost/season/sun), Seedtime (add-succession, linked dates, timeline sorts) and Seed to Spoon (reviews: calendar clarity, CSV seed import, multi-garden switching).
+
+**Bugs fixed**
+| Area | Problem | Fix |
+|---|---|---|
+| Valves | `POST /run` with missing/non-numeric `minutes` opened the valve, then threw on `new Date(NaN).toISOString()` before the run was recorded → valve left open | Validate first (400), record + persist the run before opening, drop + close if the open fails; `/log` validated too; tests |
+| Water model | Irrigation events bucketed by the *runtime's* zone: on a UTC server (Docker, add-on) an 8 pm hand-watering landed on tomorrow, so today still said "water" | `localDateOf(start, weather.utcOffsetSeconds)`; NaN-depth events ignored; test |
+| Auto-watering | An error (HA unreachable) consumed the day — no retry | Only real decisions mark the day done |
+| Data safety | Corrupt `garden.json` silently became the sample garden; next autosave overwrote it | Move aside as `.corrupt-<time>`; daily + big-change backups with restore UI |
+| Multi-device | Last write wins: an open desktop tab silently overwrote phone edits | Optimistic concurrency (`X-Jardin-Base`, 409), idle pick-up, conflict banner |
+| Autosave | Edit then switch apps within 700 ms → lost; failed saves never retried; undo back to the saved state left "Saving…" forever; undo during an in-flight save could leave the server a step ahead | Flush on hide (`keepalive`), backoff retry, saved-object tracking, re-save after in-flight change |
+| Beds | Width/length committed per keystroke and *deleted* plantings outside the new size (typing "12" passed through "1") | Commit on blur; never delete; flag + one-click remove (also on Site map size fields and lat/lon) |
+| Import | JSON import skipped `migrateGarden` (older files crash views) and replaced the garden without asking | Migrate + confirm (undoable) |
+| Today | Weather failure blanked the whole tab | Stand-in bundle, warning + Retry; soil meter hidden rather than "0%" |
+| Plan | "Growing now" showed raw stages and >100% ("late · 738%" for chives), one row per square | Plain labels (Seedling / Growing n% / Harvesting / Past its harvest window / Established), grouped rows, perennials "as needed" |
+| Settings (phone) | Publish-sensors label overflowed to 657 px | Wrap text; `code { overflow-wrap: anywhere }` |
+| Beds | Square tooltip showed plant ids ("leaf-lettuce") | Plant names |
+| Server | Malformed JSON body → 500 | 400 |
+
+**QoL added**: two-week *Coming up* (Today), drag-to-paint/erase, palette filters, *+ Succession*, seeds & plants list + seed box (+ copy as shopping list), print plan, journal search, backups/restore, sync banners, floating toasts, `scripts/fake-weather.ts`.
+
+**Review notes not acted on** (low impact, left as is): forecast cache can serve yesterday's `today` for up to an hour after local midnight; the standalone server still has no auth (§8); `getArchive` caches a range forever even if it ends near today (current callers only ask for complete years); task titles read "Start indoors: Start Eggplant seeds indoors" in the agenda (label + title duplicate).

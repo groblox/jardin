@@ -4,7 +4,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { join, extname, normalize } from 'node:path';
 import type { Garden } from '../src/core/types.ts';
 import { migrateGarden, sampleGarden } from '../src/core/defaults.ts';
-import { readJson, writeJson } from './store.ts';
+import { readJson, writeJson, snapshotGarden, listBackups, readBackup } from './store.ts';
 import { loadHaConfig, saveHaConfig, haStatus, getStates, history, readNumber } from './ha.ts';
 import { getForecast, getArchive, getSeasonWeather } from './weather.ts';
 import { initAgenda, notifyStatus, sendDigestNow, computeAgenda } from './agenda.ts';
@@ -31,7 +31,32 @@ async function body(req: IncomingMessage): Promise<any> {
     if (size > 25_000_000) throw Object.assign(new Error('Body too large'), { status: 413 });
     chunks.push(c);
   }
-  return chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
+  if (!chunks.length) return {};
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  } catch {
+    throw Object.assign(new Error('Request body is not valid JSON'), { status: 400 });
+  }
+}
+
+// Safety nets for the one file that matters: a snapshot before the first save of each day, and
+// before any save that would drop beds, many plantings or journal entries (bad import, reset…).
+const size = (g: Garden) => ({
+  beds: g.beds.length,
+  plantings: g.beds.reduce((s, b) => s + (b.plantings?.length ?? 0), 0),
+  journal: g.journal?.length ?? 0,
+  obstacles: g.site?.obstacles?.length ?? 0,
+});
+let lastDailyBackup = (await listBackups())[0]?.at.slice(0, 10) ?? '';
+async function backupBeforeSave(next: Garden) {
+  const a = size(garden);
+  const b = size(next);
+  const big = b.beds < a.beds || b.plantings < a.plantings - 10 || b.journal < a.journal - 5 || b.obstacles < a.obstacles - 2;
+  const day = new Date().toISOString().slice(0, 10);
+  if (!big && lastDailyBackup === day) return;
+  // null = nothing on disk yet (fresh install): try again on the next save.
+  const made = await snapshotGarden(big ? 'big-change' : 'daily');
+  if (made) lastDailyBackup = day;
 }
 
 const num = (u: URL, k: string) => {
@@ -42,13 +67,23 @@ const num = (u: URL, k: string) => {
 
 route('GET', '/api/health', async () => ({ ok: true }));
 route('GET', '/api/garden', async () => garden);
+route('GET', '/api/garden/version', async () => ({ updatedAt: garden.updatedAt }));
 route('PUT', '/api/garden', async (req) => {
   const g = await body(req);
   if (g?.version !== 1 || !g.site || !Array.isArray(g.beds)) throw Object.assign(new Error('Invalid garden'), { status: 400 });
-  garden = { ...migrateGarden(g), updatedAt: new Date().toISOString() };
+  // Optimistic concurrency: a client says which version it edited. If another device saved since,
+  // refuse rather than silently overwrite; the client asks the user what to do.
+  const base = req.headers['x-jardin-base'];
+  if (typeof base === 'string' && base && base !== garden.updatedAt)
+    throw Object.assign(new Error('The garden was changed on another device'), { status: 409, extra: { conflict: true, updatedAt: garden.updatedAt } });
+  const next = { ...migrateGarden(g), updatedAt: new Date().toISOString() };
+  await backupBeforeSave(next).catch((e) => console.error('Backup failed:', e.message));
+  garden = next;
   await writeJson('garden.json', garden);
   return { ok: true, updatedAt: garden.updatedAt };
 });
+route('GET', '/api/backups', async () => listBackups());
+route('GET', '/api/backups/:name', async (_r, _u, [name]) => readBackup(name));
 
 route('GET', '/api/weather', async (_r, u) => getForecast(num(u, 'lat'), num(u, 'lon')));
 route('GET', '/api/season-weather', async (_r, u) => getSeasonWeather(num(u, 'lat'), num(u, 'lon')));
@@ -89,11 +124,11 @@ route('GET', '/api/irrigation/:bed/evaluate', async (_r, _u, [id]) => {
   const ev = await evaluate(bed);
   return { rec: ev.rec, reading: ev.reading, sensorFraction: ev.sensorFraction, taw: ev.sim.taw, raw: ev.sim.raw };
 });
-route('POST', '/api/irrigation/:bed/run', async (req, _u, [id]) => startRun(id, Number((await body(req)).minutes)));
+route('POST', '/api/irrigation/:bed/run', async (req, _u, [id]) => startRun(id, (await body(req)).minutes));
 route('POST', '/api/irrigation/:bed/stop', async (_r, _u, [id]) => (await stopRun(id), irrigationState()));
 route('POST', '/api/irrigation/:bed/log', async (req, _u, [id]) => {
   const b = await body(req);
-  await logManual(id, Number(b.minutes), b.note);
+  await logManual(id, b.minutes, b.note);
   return irrigationState();
 });
 
@@ -135,7 +170,7 @@ createServer(async (req, res) => {
       res.end(JSON.stringify(out));
     } catch (e: any) {
       res.writeHead(e.status ?? 500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: e.message ?? String(e) }));
+      res.end(JSON.stringify({ error: e.message ?? String(e), ...(e.extra ?? {}) }));
     }
     return;
   }

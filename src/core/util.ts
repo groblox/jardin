@@ -22,6 +22,16 @@ export function isoDate(d: Date): string {
   return `${y}-${m}-${day}`;
 }
 
+/**
+ * Calendar date (YYYY-MM-DD) of an ISO timestamp in the garden's time zone, given its UTC offset.
+ * Without an offset, falls back to the runtime's zone (fine in a browser at home, wrong on a UTC server).
+ */
+export function localDateOf(iso: string, utcOffsetSeconds?: number): string {
+  const t = Date.parse(iso);
+  if (utcOffsetSeconds == null || !Number.isFinite(utcOffsetSeconds)) return isoDate(new Date(t));
+  return new Date(t + utcOffsetSeconds * 1000).toISOString().slice(0, 10);
+}
+
 /** Parse YYYY-MM-DD as local noon (avoids DST/UTC edge flips). */
 export function parseIso(s: string): Date {
   const [y, m, d] = s.split('-').map(Number);

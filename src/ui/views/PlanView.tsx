@@ -11,6 +11,7 @@ import type { JournalEntry } from '../../core/types.ts';
 import { addDays, fmtDate, isoDate, parseIso, uid } from '../../core/util.ts';
 import { Meter } from '../components/Chart.tsx';
 import { Status } from '../components/Field.tsx';
+import { SeedsPanel } from './SeedsPanel.tsx';
 
 export function PlanView() {
   const { garden, weather, update } = useGarden();
@@ -24,14 +25,21 @@ export function PlanView() {
   const yields = useMemo(() => seasonYields(garden, year), [garden, year]);
 
   const growing = useMemo(() => {
-    const out: { bedName: string; r: NonNullable<ReturnType<typeof simulateGrowth>> }[] = [];
+    // One row per crop × bed × planting date (several squares of the same sowing are one row).
+    const rows = new Map<string, { bedName: string; r: NonNullable<ReturnType<typeof simulateGrowth>>; n: number }>();
     for (const bed of garden.beds)
       for (const pl of bed.plantings) {
         if (!pl.plantedOn || pl.removedOn) continue;
+        const k = `${bed.id}|${pl.plantId}|${pl.plantedOn}|${pl.method}`;
+        const row = rows.get(k);
+        if (row) {
+          row.n++;
+          continue;
+        }
         const r = simulateGrowth(pl, weather?.daily ?? [], { today: weather?.today ?? todayIso, sunHours: bed.analysis?.sunHours });
-        if (r && r.stage !== 'done') out.push({ bedName: bed.name, r });
+        if (r && r.stage !== 'done') rows.set(k, { bedName: bed.name, r, n: 1 });
       }
-    return out;
+    return [...rows.values()];
   }, [garden.beds, weather, todayIso]);
 
   const visible = tasks.filter((t) => (showDone || !t.done) && ((t.endDate ?? t.date) >= todayIso || !t.done));
@@ -60,8 +68,9 @@ export function PlanView() {
           <h2>{year} season</h2>
           <button onClick={() => setYear(year + 1)} aria-label="Next season">›</button>
         </div>
-        <div className="muted">
-          Last frost <b>{fmtDate(season.lastFrost)}</b> · first frost <b>{fmtDate(season.firstFrost)}</b> · {season.frostFreeDays} frost-free days
+        <div className="row gap wrap">
+          <span className="muted">Last frost <b>{fmtDate(season.lastFrost)}</b> · first frost <b>{fmtDate(season.firstFrost)}</b> · {season.frostFreeDays} frost-free days</span>
+          <button className="small no-print" onClick={() => window.print()} title="Print the timeline, seed list and tasks">Print plan</button>
         </div>
       </div>
 
@@ -72,6 +81,8 @@ export function PlanView() {
             <Gantt year={year} />
           </section>
 
+          <SeedsPanel year={year} />
+
           {growing.length > 0 && (
             <section className="card">
               <h3>Growing now</h3>
@@ -80,16 +91,16 @@ export function PlanView() {
                 <table className="table">
                   <thead><tr><th>Crop</th><th>Bed</th><th>Planted</th><th>Progress</th><th>Ready</th><th>Alerts</th></tr></thead>
                   <tbody>
-                    {growing.map(({ bedName, r }) => (
+                    {growing.map(({ bedName, r, n }) => (
                       <tr key={r.planting.id}>
-                        <td><span aria-hidden="true">{r.plant.icon}</span> {r.plant.name}</td>
+                        <td><span aria-hidden="true">{r.plant.icon}</span> {r.plant.name}{n > 1 ? <span className="muted"> ×{n}</span> : null}</td>
                         <td>{bedName}</td>
                         <td className="tabular">{fmtDate(r.planting.plantedOn!)}</td>
                         <td style={{ minWidth: 110 }}>
                           <Meter value={Math.min(1, r.progress)} tone={r.progress >= 1 ? 'good' : 'accent'} label={`${r.plant.name} progress`} />
-                          <span className="small muted">{r.stage} · {Math.round(r.progress * 100)}%</span>
+                          <span className="small muted">{growthLabel(r, weather?.today ?? todayIso)}</span>
                         </td>
-                        <td className="tabular">{r.maturityDate ? fmtDate(r.maturityDate) : '—'}{r.harvestEndDate ? ` – ${fmtDate(r.harvestEndDate)}` : ''}</td>
+                        <td className="tabular">{r.plant.perennial ? 'as needed' : <>{r.maturityDate ? fmtDate(r.maturityDate) : '—'}{r.harvestEndDate ? ` – ${fmtDate(r.harvestEndDate)}` : ''}</>}</td>
                         <td>{r.warnings.slice(0, 2).map((w, i) => <div key={i}><Status tone={w.level === 'bad' ? 'critical' : 'warning'}>{fmtDate(w.date)}: {w.kind}</Status></div>)}</td>
                       </tr>
                     ))}
@@ -174,6 +185,14 @@ export function PlanView() {
 }
 
 const addIso = (d: string, n: number) => isoDate(addDays(parseIso(d), n));
+
+/** Plain words for where a crop is, instead of raw model stages and >100% progress. */
+function growthLabel(r: NonNullable<ReturnType<typeof simulateGrowth>>, todayIso: string): string {
+  if (r.plant.perennial) return r.progress >= 1 ? 'Established' : `Establishing · ${Math.round(r.progress * 100)}%`;
+  if (r.progress >= 1) return r.harvestEndDate && r.harvestEndDate < todayIso ? 'Past its harvest window' : 'Harvesting';
+  if (r.stage === 'initial') return `Seedling · ${Math.round(r.progress * 100)}%`;
+  return `Growing · ${Math.round(r.progress * 100)}%`;
+}
 
 function Gantt({ year }: { year: number }) {
   const { garden } = useGarden();

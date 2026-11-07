@@ -123,7 +123,7 @@ h2 { font-size: 20px; margin: 0; }
 h3 { font-size: 15px; margin: 0 0 10px; }
 h4 { font-size: 13px; margin: 14px 0 6px; color: var(--text-secondary); }
 p { margin: 6px 0; }
-code { font-size: 12px; background: var(--surface-2); padding: 1px 4px; border-radius: 4px; }
+code { font-size: 12px; background: var(--surface-2); padding: 1px 4px; border-radius: 4px; overflow-wrap: anywhere; }
 .muted { color: var(--text-muted); }
 .small { font-size: 12px; }
 .block { display: block; }
@@ -167,8 +167,8 @@ input[type='range'] { padding: 0; border: none; background: none; accent-color: 
 
 .boot { display: grid; place-items: center; height: 100vh; font-size: 18px; }
 .app { min-height: 100vh; }
+.sticky-top { position: sticky; top: 0; z-index: 10; }
 .topbar {
-  position: sticky; top: 0; z-index: 10;
   display: flex; align-items: center; gap: 16px;
   padding: 8px 16px;
   background: var(--surface-1);
@@ -397,3 +397,49 @@ input.full { width: 100%; }
 .file-btn:focus-within span { outline: 2px solid var(--accent); }
 .undo { display: inline-flex; gap: 2px; }
 .undo button { min-width: 30px; }
+
+/* --- v3: sync banner --- */
+.app-banner { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 8px 16px; background: var(--accent-soft); border-bottom: 1px solid var(--border); font-size: 13px; }
+.app-banner.warning { background: color-mix(in srgb, var(--warning) 22%, var(--surface-1)); }
+.save-state.conflict { color: var(--warning-ink); font-weight: 600; }
+
+/* --- v3: coming up --- */
+.coming-up > div { margin-top: 10px; }
+.strong-muted { font-weight: 600; color: var(--text-secondary); }
+.coming-list { list-style: none; padding: 0; margin: 2px 0 0; display: flex; flex-direction: column; gap: 2px; }
+.link-row { display: flex; gap: 8px; align-items: center; width: 100%; text-align: left; border: none; background: none; padding: 4px 6px; min-height: 0; font-size: 13px; border-radius: 6px; }
+.link-row:hover:not(:disabled) { background: var(--surface-2); }
+.link-row .task-kind { flex: none; }
+
+/* --- v3: beds --- */
+.chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.chip { min-height: 24px; padding: 1px 9px; font-size: 12px; border-radius: 999px; }
+.chip.active { background: var(--accent-soft); border-color: var(--accent); font-weight: 600; }
+.sfg.painting { touch-action: none; user-select: none; -webkit-user-select: none; }
+.sfg.painting .sq { cursor: crosshair; }
+.backups summary { cursor: pointer; font-weight: 600; font-size: 13px; margin-top: 8px; }
+.backup-list { list-style: none; padding: 0; margin: 4px 0 0; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.backup-list li { display: flex; gap: 8px; align-items: center; border-bottom: 1px solid var(--grid); padding: 4px 0; }
+
+/* --- v3: seeds --- */
+.table .num { text-align: right; }
+.nowrap { white-space: nowrap; }
+.seeds-table td { vertical-align: middle; }
+.seed-box summary { cursor: pointer; font-weight: 600; font-size: 13px; }
+.packet-list { list-style: none; padding: 0; margin: 6px 0; display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
+.packet-list li { display: flex; gap: 8px; align-items: center; padding: 3px 0; border-bottom: 1px solid var(--grid); }
+.packet-list li.empty { opacity: 0.5; }
+.packet-list select { min-height: 26px; padding: 2px 6px; font-size: 12px; }
+
+/* --- v3: print the plan --- */
+@media print {
+  :root { color-scheme: light; }
+  body { background: #fff; }
+  .topbar, .app-banner, .no-print, .plan-view button, .plan-view input[type='checkbox'], .seed-box { display: none !important; }
+  main { padding: 0; max-width: none; }
+  .plan-layout { grid-template-columns: minmax(0, 1fr) !important; }
+  .card { break-inside: avoid; border: 1px solid #ccc; box-shadow: none; }
+  .tasks li { break-inside: avoid; }
+}
+/* Toasts float over the page so they never shift the grid (or anything else) under the pointer. */
+.toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 50; max-width: min(560px, calc(100vw - 32px)); box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18); padding: 8px 14px; }

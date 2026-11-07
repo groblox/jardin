@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Garden, Site } from '../../core/types.ts';
 import { useGarden } from '../store.tsx';
-import { api, type HaStatus } from '../api.ts';
+import { api, type BackupInfo, type HaStatus } from '../api.ts';
 import { estimateFrostDates } from '../../core/weather.ts';
-import { sampleGarden } from '../../core/defaults.ts';
+import { migrateGarden, sampleGarden } from '../../core/defaults.ts';
 import { sunTimes } from '../../core/solar.ts';
 import { Field, NumberInput, Status } from '../components/Field.tsx';
 import { fmtTime } from '../format.ts';
@@ -58,7 +58,8 @@ export function SettingsView() {
     try {
       const g = JSON.parse(await f.text()) as Garden;
       if (g.version !== 1 || !g.site || !Array.isArray(g.beds)) throw new Error('Not a Jardin garden file');
-      update(() => g);
+      if (!confirm(`Replace the current garden with “${g.site.name ?? 'imported garden'}” (${g.beds.length} bed${g.beds.length === 1 ? '' : 's'})? You can undo this.`)) return;
+      update(() => migrateGarden(g));
     } catch (e: any) {
       alert(e.message);
     }
@@ -75,8 +76,8 @@ export function SettingsView() {
         <h3>Location</h3>
         <div className="grid3">
           <Field label="Garden name"><input value={site.name} onChange={(e) => setSite({ name: e.target.value })} /></Field>
-          <Field label="Latitude"><NumberInput value={site.lat} step={0.0001} min={-89} max={89} onChange={(v) => setSite({ lat: v })} /></Field>
-          <Field label="Longitude"><NumberInput value={site.lon} step={0.0001} min={-180} max={180} onChange={(v) => setSite({ lon: v })} /></Field>
+          <Field label="Latitude"><NumberInput commitOnBlur value={site.lat} step={0.0001} min={-89} max={89} onChange={(v) => setSite({ lat: v })} /></Field>
+          <Field label="Longitude"><NumberInput commitOnBlur value={site.lon} step={0.0001} min={-180} max={180} onChange={(v) => setSite({ lon: v })} /></Field>
         </div>
         <button onClick={locate}>Use my current location</button>
         {geoErr && <Status tone="critical">{geoErr}</Status>}
@@ -86,8 +87,8 @@ export function SettingsView() {
       <section className="card">
         <h3>Property</h3>
         <div className="grid3">
-          <Field label="Width (left–right)"><NumberInput value={site.widthFt} min={10} max={1000} suffix="ft" onChange={(v) => setSite({ widthFt: v })} /></Field>
-          <Field label="Depth (top–bottom)"><NumberInput value={site.depthFt} min={10} max={1000} suffix="ft" onChange={(v) => setSite({ depthFt: v })} /></Field>
+          <Field label="Width (left–right)"><NumberInput commitOnBlur value={site.widthFt} min={10} max={1000} suffix="ft" onChange={(v) => setSite({ widthFt: v })} /></Field>
+          <Field label="Depth (top–bottom)"><NumberInput commitOnBlur value={site.depthFt} min={10} max={1000} suffix="ft" onChange={(v) => setSite({ depthFt: v })} /></Field>
           <Field label="North on the map" hint="Bearing clockwise from the top of the map where true north points. Use a phone compass standing at the property facing the map's 'up' direction, then enter 360 − heading.">
             <NumberInput value={site.northDeg} min={0} max={359} suffix="°" onChange={(v) => setSite({ northDeg: ((v % 360) + 360) % 360 })} />
             <input type="range" min={0} max={359} value={site.northDeg} onChange={(e) => setSite({ northDeg: +e.target.value })} aria-label="North bearing" />
@@ -114,9 +115,10 @@ export function SettingsView() {
         <div className="row gap wrap">
           <button onClick={exportJson}>Export JSON</button>
           <button onClick={() => fileRef.current?.click()}>Import JSON</button>
-          <input ref={fileRef} type="file" accept="application/json" hidden onChange={(e) => e.target.files?.[0] && importJson(e.target.files[0])} />
+          <input ref={fileRef} type="file" accept="application/json" hidden onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) importJson(f); }} />
           <button className="danger" onClick={() => confirm('Replace everything with the sample garden?') && update(() => sampleGarden())}>Reset to sample</button>
         </div>
+        {server && <Backups />}
       </section>
     </div>
   );
@@ -194,7 +196,7 @@ function NotifySection() {
       </div>
       <label className="row gap"><input type="checkbox" checked={n.dailyDigest} onChange={(e) => set({ dailyDigest: e.target.checked })} /> Morning digest of today’s garden to-dos</label>
       <label className="row gap"><input type="checkbox" checked={n.frostAlerts} onChange={(e) => set({ frostAlerts: e.target.checked })} /> Afternoon frost alert when tender crops are at risk tonight</label>
-      <label className="row gap"><input type="checkbox" checked={n.publishSensors} onChange={(e) => set({ publishSensors: e.target.checked })} /> Publish <code>sensor.jardin_&lt;bed&gt;_soil_water</code> and <code>sensor.jardin_todo_today</code> to Home Assistant (for dashboards & automations)</label>
+      <label className="row gap"><input type="checkbox" checked={n.publishSensors} onChange={(e) => set({ publishSensors: e.target.checked })} /> <span className="grow">Publish <code>sensor.jardin_&lt;bed&gt;_soil_water</code> and <code>sensor.jardin_todo_today</code> to Home Assistant (for dashboards & automations)</span></label>
       <div className="row gap wrap">
         <button onClick={async () => { try { const d = await api.notifyTest(); setMsg(`Sent: ${d.title}`); setStatus(await api.notifyStatus()); } catch (e: any) { setMsg(e.message); } }}>Send digest now</button>
         {msg && <span className="small">{msg}</span>}
@@ -215,3 +217,46 @@ function NotifySection() {
     </section>
   );
 }
+
+function Backups() {
+  const { update } = useGarden();
+  const [list, setList] = useState<BackupInfo[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const load = () => api.backups().then(setList, (e) => setErr(e.message));
+  useEffect(() => {
+    load();
+  }, []);
+  const restore = async (b: BackupInfo) => {
+    if (!confirm(`Restore the garden as it was ${when(b.at)}? Your current garden can be brought back with undo.`)) return;
+    setBusy(b.name);
+    setErr(null);
+    try {
+      const g = await api.backup(b.name);
+      if (g?.version !== 1 || !Array.isArray(g.beds)) throw new Error('That backup is not a valid garden file');
+      update(() => migrateGarden(g));
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setBusy(null);
+    }
+  };
+  return (
+    <details className="backups" onToggle={(e) => (e.target as HTMLDetailsElement).open && load()}>
+      <summary>Backups {list ? <span className="muted small">({list.length})</span> : null}</summary>
+      <p className="muted small">The server keeps a copy of the garden before the first save each day, and before any save that removes beds or many plantings or journal entries (an import or a reset, say). The newest 20 are kept in <code>data/backups</code>.</p>
+      {err && <Status tone="critical">{err}</Status>}
+      {list && !list.length && <p className="muted small">No backups yet — the first one is made with tomorrow’s first change.</p>}
+      <ul className="backup-list">
+        {list?.map((b) => (
+          <li key={b.name}>
+            <span className="grow">{when(b.at)} <span className="muted small">· {b.reason === 'big-change' ? 'before a big change' : 'start of day'} · {(b.bytes / 1024).toFixed(0)} KB</span></span>
+            <button className="small" disabled={busy === b.name} onClick={() => restore(b)}>{busy === b.name ? 'Restoring…' : 'Restore'}</button>
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
+}
+
+const when = (iso: string) => new Date(iso).toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });

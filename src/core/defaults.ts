@@ -42,6 +42,7 @@ export function migrateGarden(g: Garden, today = new Date()): Garden {
   return {
     ...g,
     journal: Array.isArray(g.journal) ? g.journal : [],
+    seeds: Array.isArray(g.seeds) ? g.seeds : [],
     notify: { ...defaultNotify(), ...(g.notify ?? {}) },
     beds: g.beds.map((b) => ({
       ...b,
@@ -94,6 +95,13 @@ export function sampleGarden(today = new Date()): Garden {
     { id: 'j3', date: ago(9), kind: 'pest', bedId: 'bed_sample2', plantId: 'kale', text: 'Aphids on undersides of two kale leaves — hosed off' },
   );
   g.beds[0].soilTests = [{ date: `${season - 1}-09-15`, ph: 6.4, organicMatterPct: 7, n: 'medium', p: 'high', k: 'medium' }];
+  // A few packets in the seed box so the shopping list shows have / old / need.
+  g.seeds = [
+    { id: 's1', plantId: 'tomato', variety: 'Sungold', year: season - 1, amount: 'half' },
+    { id: 's2', plantId: 'carrot', variety: 'Nantes', year: season - 4, amount: 'low' },
+    { id: 's3', plantId: 'bean', variety: 'Provider', year: season - 1, amount: 'full' },
+    { id: 's4', plantId: 'lettuce', variety: 'Buttercrunch', year: season, amount: 'full' },
+  ];
   return g;
 }
 
@@ -101,6 +109,7 @@ function sampleGardenRaw(): Garden {
   return {
     version: 1,
     journal: [],
+    seeds: [],
     notify: defaultNotify(),
     updatedAt: new Date().toISOString(),
     site: {

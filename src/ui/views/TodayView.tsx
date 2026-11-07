@@ -1,8 +1,9 @@
 import { useMemo, useState } from 'react';
-import type { JournalEntry } from '../../core/types.ts';
+import type { JournalEntry, WeatherBundle } from '../../core/types.ts';
 import { useGarden } from '../store.tsx';
 import { api } from '../api.ts';
-import { buildAgenda, type AgendaItem } from '../../core/today.ts';
+import { buildAgenda, upcomingTasks, type AgendaItem } from '../../core/today.ts';
+import { TASK_LABEL, type Task } from '../../core/tasks.ts';
 import { evaluateBed } from '../../core/water.ts';
 import { occupancyAt } from '../../core/succession.ts';
 import { PLANT_BY_ID } from '../../core/plants.ts';
@@ -20,18 +21,28 @@ const GROUPS: { label: string; match: (p: number) => boolean }[] = [
   { label: 'When you have time', match: (p) => p === 3 },
 ];
 
+/** Stand-in when the forecast can't be fetched: tasks, harvests and notes still work; weather alerts pause. */
+function noWeather(lat: number, lon: number): WeatherBundle {
+  const now = new Date();
+  return {
+    lat, lon, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, utcOffsetSeconds: -now.getTimezoneOffset() * 60,
+    today: isoDate(now), daily: [], fetchedAt: '',
+  };
+}
+
 export function TodayView() {
-  const { garden, update, weather, weatherError, seasonWeather, readings, irrigation, refreshIrrigation, server, setTab, setSelectedBedId } = useGarden();
+  const { garden, update, weather: liveWeather, weatherError, refreshWeather, seasonWeather, readings, irrigation, refreshIrrigation, server, setTab, setSelectedBedId } = useGarden();
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const weather = useMemo(() => liveWeather ?? (weatherError ? noWeather(garden.site.lat, garden.site.lon) : null), [liveWeather, weatherError, garden.site.lat, garden.site.lon]);
 
   const items = useMemo(() => {
     if (!weather) return [];
     return buildAgenda({ garden, weather, season: seasonWeather ?? undefined, events: irrigation?.events ?? [], readings, activeRuns: irrigation?.active.map((r) => r.bedId) });
   }, [garden, weather, seasonWeather, irrigation, readings]);
+  const upcoming = useMemo(() => (weather ? upcomingTasks(garden, weather.today) : []), [garden, weather]);
 
-  if (weatherError) return <div className="view"><Status tone="critical">Weather unavailable: {weatherError}</Status></div>;
   if (!weather) return <div className="view"><p className="muted">Loading today’s garden…</p></div>;
 
   const todayIso = weather.today;
@@ -73,6 +84,12 @@ export function TodayView() {
 
       <div className="today-layout">
         <div className="agenda">
+          {weatherError && !liveWeather && (
+            <section className="card row gap wrap">
+              <Status tone="warning">Weather is unavailable ({weatherError}). Frost, heat, watering and disease alerts are paused; tasks and harvests below still apply.</Status>
+              <button className="small" onClick={refreshWeather}>Retry</button>
+            </section>
+          )}
           {err && <Status tone="critical">{err}</Status>}
           {GROUPS.map((g) => {
             const list = visible.filter((i) => g.match(i.priority));
@@ -103,7 +120,8 @@ export function TodayView() {
         </div>
 
         <aside className="side-col">
-          <BedCards />
+          <BedCards weather={weather} />
+          <ComingUp tasks={upcoming} onOpen={(bedId) => { if (bedId) setSelectedBedId(bedId); setTab('plan'); }} />
         </aside>
       </div>
     </div>
@@ -150,9 +168,40 @@ function AgendaRow({ it, busy, server, onDismiss, onWater, onPlanted, onHarvest,
   );
 }
 
-function BedCards() {
-  const { garden, weather, irrigation, readings, setSelectedBedId, setTab } = useGarden();
-  if (!weather) return null;
+/** GrowVeg-style look-ahead: the next two weeks of scheduled jobs, grouped by day. */
+function ComingUp({ tasks, onOpen }: { tasks: Task[]; onOpen: (bedId?: string) => void }) {
+  if (!tasks.length) return null;
+  const byDay = new Map<string, Task[]>();
+  for (const t of tasks) {
+    if (!byDay.has(t.date)) byDay.set(t.date, []);
+    byDay.get(t.date)!.push(t);
+  }
+  return (
+    <section className="card coming-up">
+      <h3>Coming up</h3>
+      <p className="muted small">The next two weeks after this week’s list.</p>
+      {[...byDay].map(([date, list]) => (
+        <div key={date}>
+          <div className="small strong-muted">{fmtDate(date, { weekday: 'short', month: 'short', day: 'numeric' })}</div>
+          <ul className="coming-list">
+            {list.map((t, i) => (
+              <li key={i}>
+                <button className="link-row" onClick={() => onOpen(t.bedId)} title="Open the plan">
+                  <span aria-hidden="true">{PLANT_BY_ID[t.plantId]?.icon}</span>
+                  <span className="grow">{t.kind === 'harvest' ? `Harvest window opens: ${t.title.replace(/^Harvest /, '')}` : t.title}{t.plantingIds.length > 1 ? <span className="muted"> · {t.plantingIds.length} sq</span> : null}</span>
+                  <span className={`task-kind k-${t.kind}`}>{TASK_LABEL[t.kind]}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+    </section>
+  );
+}
+
+function BedCards({ weather }: { weather: WeatherBundle }) {
+  const { garden, irrigation, readings, setSelectedBedId, setTab } = useGarden();
   const now = parseIso(weather.today);
   return (
     <>
@@ -161,12 +210,13 @@ function BedCards() {
         const day = ev.sim.days.find((d) => d.date === weather.today);
         const occ = occupancyAt(bed, garden.site, now);
         const growing = [...new Set(occ.filter(Boolean).map((id) => bed.plantings.find((p) => p.id === id)!.plantId))];
-        const avail = day?.available ?? 0;
+        // No weather → no model day; fall back to the live sensor, else show no meter rather than "0%".
+        const avail = day?.available ?? (ev.sensorFraction != null ? Math.min(1, ev.sensorFraction) : null);
         return (
           <button key={bed.id} className="card bed-card" onClick={() => { setSelectedBedId(bed.id); setTab('beds'); }}>
             <div className="row between"><b>{bed.name}</b><span className="muted small">{occ.filter(Boolean).length}/{occ.length} sq</span></div>
             <div className="bed-card-icons" aria-label="Growing now">{growing.length ? growing.map((id) => <span key={id} title={PLANT_BY_ID[id].name}>{PLANT_BY_ID[id].icon}</span>) : <span className="muted small">Nothing growing</span>}</div>
-            {growing.length > 0 && (
+            {growing.length > 0 && avail != null && (
               <>
                 <div className="row between small"><span>Soil water</span><span className="tabular">{Math.round(avail * 100)}%{ev.sensorFraction != null ? ' · sensor' : ''}</span></div>
                 <Meter value={avail} tone={avail < 0.5 ? 'critical' : avail < 0.65 ? 'warning' : 'good'} label={`${bed.name} soil water`} />

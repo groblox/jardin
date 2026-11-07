@@ -589,8 +589,8 @@ export function SiteView() {
               <div className="grid2">
                 <Field label="Name"><input value={selBed.name} onChange={(e) => updateBed(selBed.id, (b) => ({ ...b, name: e.target.value }))} /></Field>
                 <Field label="Raised height"><NumberInput value={selBed.heightFt} step={0.5} min={0} suffix="ft" onChange={(v) => updateBed(selBed.id, (b) => ({ ...b, heightFt: v }))} /></Field>
-                <Field label="Width (E–W)"><NumberInput value={selBed.widthFt} min={1} max={20} suffix="ft" onChange={(v) => updateBed(selBed.id, (b) => ({ ...b, widthFt: Math.round(v) }))} /></Field>
-                <Field label="Length"><NumberInput value={selBed.lengthFt} min={1} max={40} suffix="ft" onChange={(v) => updateBed(selBed.id, (b) => ({ ...b, lengthFt: Math.round(v) }))} /></Field>
+                <Field label="Width (E–W)"><NumberInput commitOnBlur value={selBed.widthFt} min={1} max={20} suffix="ft" onChange={(v) => updateBed(selBed.id, (b) => ({ ...b, widthFt: Math.round(v) }))} /></Field>
+                <Field label="Length"><NumberInput commitOnBlur value={selBed.lengthFt} min={1} max={40} suffix="ft" onChange={(v) => updateBed(selBed.id, (b) => ({ ...b, lengthFt: Math.round(v) }))} /></Field>
               </div>
               {sun.season && (
                 <p>Season sun: <b>{sampleBedSun(sun.season, selBed).toFixed(1)} h/day</b> — {sunCategory(sampleBedSun(sun.season, selBed)).label}</p>

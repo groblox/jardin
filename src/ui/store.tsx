@@ -2,8 +2,9 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import type { Garden, WeatherBundle } from '../core/types.ts';
 import { migrateGarden, sampleGarden } from '../core/defaults.ts';
 import { periodDates, type SunMap, type SunPeriod } from '../core/shade.ts';
-import { api, probeServer, type IrrigationStatus } from './api.ts';
+import { api, probeServer, type ApiError, type IrrigationStatus } from './api.ts';
 import type { SeasonWeather } from '../core/weather.ts';
+import { isoDate } from '../core/util.ts';
 
 export type Tab = 'today' | 'site' | 'beds' | 'plan' | 'water' | 'health' | 'forecast' | 'simulate' | 'journal' | 'settings';
 
@@ -40,8 +41,16 @@ interface Ctx {
   setTab: (t: Tab) => void;
   selectedBedId: string | null;
   setSelectedBedId: (id: string | null) => void;
-  saveState: 'saved' | 'saving' | 'error';
+  saveState: SaveState;
+  /** Set when another device saved since this one loaded; autosave pauses until resolved. */
+  conflict: { updatedAt: string } | null;
+  resolveConflict: (keep: 'mine' | 'theirs') => Promise<void>;
+  /** A short message for the top of the app ("Updated from another device"). */
+  notice: string | null;
+  clearNotice: () => void;
 }
+
+export type SaveState = 'saved' | 'saving' | 'error' | 'conflict';
 
 const GardenCtx = createContext<Ctx | null>(null);
 
@@ -92,11 +101,22 @@ export function GardenProvider({ children }: { children: ReactNode }) {
     }
   });
   const [selectedBedId, setSelectedBedId] = useState<string | null>(null);
-  const [saveState, setSaveState] = useState<'saved' | 'saving' | 'error'>('saved');
-  const [sun, setSun] = useState<SunState>({ map: null, season: null, period: 'season', date: new Date().toISOString().slice(0, 10), computing: false, progress: 0 });
+  const [saveState, setSaveState] = useState<SaveState>('saved');
+  const [conflict, setConflict] = useState<{ updatedAt: string } | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [sun, setSun] = useState<SunState>({ map: null, season: null, period: 'season', date: isoDate(new Date()), computing: false, progress: 0 });
   const runSun = useSunWorker();
   const runSeason = useSunWorker();
-  const dirty = useRef(false);
+  /** Server version (updatedAt) the local garden is based on. */
+  const baseVersion = useRef<string | null>(null);
+  /** The garden object last persisted (or loaded); anything else is unsaved. */
+  const savedGarden = useRef<Garden | null>(null);
+  const saveChain = useRef<Promise<void>>(Promise.resolve());
+  const conflictRef = useRef(false);
+  const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retries = useRef(0);
+  /** Unsaved changes include something the user did (not just automatic bookkeeping like sun analysis). */
+  const userEdits = useRef(false);
 
   const setTab = (t: Tab) => {
     setTabState(t);
@@ -114,9 +134,16 @@ export function GardenProvider({ children }: { children: ReactNode }) {
       setServer(s);
       try {
         const g = await api.loadGarden(s);
-        if (g) setGarden(migrateGarden(g));
+        if (g) {
+          const m = migrateGarden(g);
+          baseVersion.current = g.updatedAt ?? null;
+          savedGarden.current = m;
+          gardenRef.current = m;
+          setGarden(m);
+        } else savedGarden.current = gardenRef.current;
       } catch (e) {
         console.error(e);
+        savedGarden.current = gardenRef.current;
       }
       setReady(true);
     })();
@@ -132,13 +159,13 @@ export function GardenProvider({ children }: { children: ReactNode }) {
   const [histV, setHistV] = useState(0);
   const commit = (next: Garden) => {
     gardenRef.current = next;
-    dirty.current = true;
     setGarden(next);
   };
   const update = useCallback((fn: (g: Garden) => Garden, opts?: { history?: boolean }) => {
     const g = gardenRef.current;
     const next = fn(g);
     if (next === g) return;
+    if (opts?.history !== false) userEdits.current = true;
     if (opts?.history !== false) {
       const now = Date.now();
       if (now - lastPush.current > 700) {
@@ -183,18 +210,122 @@ export function GardenProvider({ children }: { children: ReactNode }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [undo, redo]);
 
-  // Debounced save.
+  // Saving: one request at a time (each carries the version it builds on), retried with backoff
+  // when the server is unreachable, paused on a conflict with another device.
+  const persist = useCallback(
+    (opts: { force?: boolean; keepalive?: boolean } = {}) => {
+      saveChain.current = saveChain.current.then(async () => {
+        const g = gardenRef.current;
+        if (g === savedGarden.current) {
+          setSaveState('saved');
+          return;
+        }
+        if (conflictRef.current && !opts.force) return;
+        if (retryTimer.current) clearTimeout(retryTimer.current);
+        retryTimer.current = null;
+        setSaveState('saving');
+        try {
+          const r = await api.saveGarden(server, g, { base: baseVersion.current, keepalive: opts.keepalive });
+          if (r?.updatedAt) baseVersion.current = r.updatedAt;
+          savedGarden.current = g;
+          retries.current = 0;
+          if (gardenRef.current === g) userEdits.current = false;
+          setSaveState(gardenRef.current === g ? 'saved' : 'saving');
+          // Edited (or undone) while this request was in flight: save the newer state too.
+          if (gardenRef.current !== g) queueMicrotask(() => persist());
+        } catch (e) {
+          const err = e as ApiError;
+          if (err.status === 409 && err.data?.conflict && !userEdits.current) {
+            // Only automatic bookkeeping is pending (e.g. two devices opened at once both caching sun
+            // analysis): take the other device's version; it will be recomputed and saved if it differs.
+            await loadRemote('').catch(() => {});
+            return;
+          }
+          if (err.status === 409 && err.data?.conflict) {
+            conflictRef.current = true;
+            setConflict({ updatedAt: err.data.updatedAt });
+            setSaveState('conflict');
+            return;
+          }
+          setSaveState('error');
+          const delay = Math.min(60000, 4000 * 2 ** retries.current++);
+          retryTimer.current = setTimeout(() => persist(), delay);
+        }
+      });
+      return saveChain.current;
+    },
+    [server],
+  );
+
   useEffect(() => {
-    if (!ready || !dirty.current) return;
+    if (!ready || conflictRef.current) return;
+    if (garden === savedGarden.current) {
+      // e.g. undo straight back to what's already saved
+      setSaveState('saved');
+      return;
+    }
     setSaveState('saving');
-    const t = setTimeout(() => {
-      api.saveGarden(server, garden).then(
-        () => setSaveState('saved'),
-        () => setSaveState('error'),
-      );
-    }, 700);
+    const t = setTimeout(() => persist(), 700);
     return () => clearTimeout(t);
-  }, [garden, ready, server]);
+  }, [garden, ready, persist]);
+
+  // Replace the local garden with the server's copy (after another device saved).
+  const loadRemote = useCallback(async (message: string) => {
+    const g = await api.loadGarden(true);
+    if (!g) return;
+    const m = migrateGarden(g);
+    baseVersion.current = g.updatedAt ?? null;
+    savedGarden.current = m;
+    past.current = [];
+    future.current = [];
+    lastPush.current = 0;
+    commit(m);
+    setHistV((v) => v + 1);
+    setSaveState('saved');
+    setNotice(message);
+  }, []);
+
+  // Don't lose the last edit when the app is backgrounded or closed; pick up edits made on other
+  // devices when coming back (and every minute while visible).
+  useEffect(() => {
+    if (!ready) return;
+    const flush = () => {
+      if (gardenRef.current !== savedGarden.current && !conflictRef.current) persist({ keepalive: true });
+    };
+    const check = async () => {
+      if (!server || conflictRef.current || document.visibilityState !== 'visible') return;
+      if (gardenRef.current !== savedGarden.current) return; // local edits still on their way
+      const v = await api.gardenVersion().catch(() => null);
+      if (!v || !baseVersion.current || v.updatedAt === baseVersion.current) return;
+      if (gardenRef.current !== savedGarden.current) return;
+      await loadRemote('Updated with changes saved on another device.').catch(() => {});
+    };
+    const onVis = () => (document.visibilityState === 'hidden' ? flush() : check());
+    document.addEventListener('visibilitychange', onVis);
+    window.addEventListener('pagehide', flush);
+    const t = setInterval(check, 60000);
+    return () => {
+      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('pagehide', flush);
+      clearInterval(t);
+    };
+  }, [ready, server, persist, loadRemote]);
+
+  const resolveConflict = useCallback(
+    async (keep: 'mine' | 'theirs') => {
+      const theirs = conflict?.updatedAt ?? null;
+      conflictRef.current = false;
+      setConflict(null);
+      if (keep === 'theirs') {
+        await loadRemote('Loaded the version saved on the other device.');
+        return;
+      }
+      baseVersion.current = theirs;
+      await persist({ force: true });
+      setNotice('Saved your version over the other device’s changes. Use undo or Settings → Backups if you need theirs back.');
+    },
+    [conflict, loadRemote, persist],
+  );
 
   const refreshWeather = useCallback(() => {
     setWeatherError(null);
@@ -311,9 +442,10 @@ export function GardenProvider({ children }: { children: ReactNode }) {
     () => ({
       ready, server, garden, update, weather, weatherError, refreshWeather, seasonWeather, readings, sun, setSunPeriod, irrigation, refreshIrrigation,
       tab, setTab, selectedBedId, setSelectedBedId, saveState, undo, redo, canUndo: past.current.length > 0, canRedo: future.current.length > 0,
+      conflict, resolveConflict, notice, clearNotice: () => setNotice(null),
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [ready, server, garden, weather, weatherError, seasonWeather, readings, sun, irrigation, tab, selectedBedId, saveState, refreshWeather, refreshIrrigation, histV],
+    [ready, server, garden, weather, weatherError, seasonWeather, readings, sun, irrigation, tab, selectedBedId, saveState, refreshWeather, refreshIrrigation, histV, conflict, resolveConflict, notice],
   );
   return <GardenCtx.Provider value={value}>{children}</GardenCtx.Provider>;
 }

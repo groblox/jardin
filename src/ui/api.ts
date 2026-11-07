@@ -3,14 +3,26 @@ import { fetchForecast, fetchArchive, fetchSeasonWeather, type SeasonWeather } f
 
 const apiUrl = (p: string) => new URL('api/' + p, document.baseURI).toString();
 
+export interface ApiError extends Error {
+  status?: number;
+  data?: any;
+}
+
 async function j<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(apiUrl(path), {
     ...init,
     headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error ?? `Request failed (${res.status})`);
+  if (!res.ok) throw Object.assign(new Error(data.error ?? `Request failed (${res.status})`), { status: res.status, data }) as ApiError;
   return data as T;
+}
+
+export interface BackupInfo {
+  name: string;
+  at: string;
+  reason: 'daily' | 'big-change' | 'restore';
+  bytes: number;
 }
 
 export interface HaStatus {
@@ -65,17 +77,31 @@ export const api = {
       return null;
     }
   },
-  async saveGarden(server: boolean, g: Garden): Promise<void> {
+  /**
+   * Save the garden. On the server, `base` is the version this edit started from; the server
+   * answers 409 if another device saved in between. `keepalive` lets a small save finish while the
+   * page is being hidden or closed (browsers cap keepalive bodies at 64 KB).
+   */
+  async saveGarden(server: boolean, g: Garden, opts: { base?: string | null; keepalive?: boolean } = {}): Promise<{ updatedAt?: string }> {
     if (server) {
-      await j('garden', { method: 'PUT', body: JSON.stringify(g) });
-      return;
+      const body = JSON.stringify(g);
+      return j<{ updatedAt: string }>('garden', {
+        method: 'PUT',
+        body,
+        keepalive: !!opts.keepalive && body.length < 60_000,
+        headers: opts.base ? { 'X-Jardin-Base': opts.base } : undefined,
+      });
     }
     try {
       localStorage.setItem(LS_KEY, JSON.stringify(g));
     } catch {
       /* storage unavailable */
     }
+    return {};
   },
+  gardenVersion: () => j<{ updatedAt: string }>('garden/version'),
+  backups: () => j<BackupInfo[]>('backups'),
+  backup: (name: string) => j<Garden>(`backups/${encodeURIComponent(name)}`),
   weather(server: boolean, lat: number, lon: number): Promise<WeatherBundle> {
     return server ? j(`weather?lat=${lat}&lon=${lon}`) : fetchForecast(lat, lon);
   },

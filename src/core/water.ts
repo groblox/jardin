@@ -1,7 +1,7 @@
 // Daily soil-water balance (FAO-56 single crop coefficient, root-zone depletion method).
 import type { Bed, DailyWeather, IrrigationEvent, SoilType } from './types.ts';
 import { PLANT_BY_ID, type PlantType } from './plants.ts';
-import { clamp, lerp, parseIso, daysBetween, GAL_PER_IN_SQFT, mmToIn, isoDate } from './util.ts';
+import { clamp, lerp, parseIso, daysBetween, GAL_PER_IN_SQFT, mmToIn, localDateOf } from './util.ts';
 
 export const SOILS: Record<SoilType, { label: string; fc: number; wp: number }> = {
   sand: { label: 'Sand', fc: 0.1, wp: 0.04 },
@@ -166,6 +166,8 @@ export interface WaterSimOptions {
   sensor?: { date: string; fraction: number };
   startAvailable?: number;
   today?: string;
+  /** The garden's UTC offset, so irrigation timestamps land on the garden's calendar day. */
+  utcOffsetSeconds?: number;
 }
 
 export function simulateWater(bed: Bed, weather: DailyWeather[], events: IrrigationEvent[], opts: WaterSimOptions = {}) {
@@ -174,8 +176,8 @@ export function simulateWater(bed: Bed, weather: DailyWeather[], events: Irrigat
   const etScale = opts.etScale ?? 1;
   const irrByDate = new Map<string, number>();
   for (const e of events) {
-    if (e.bedId !== bed.id) continue;
-    const d = isoDate(new Date(e.start));
+    if (e.bedId !== bed.id || !Number.isFinite(e.depthMm)) continue;
+    const d = localDateOf(e.start, opts.utcOffsetSeconds);
     irrByDate.set(d, (irrByDate.get(d) ?? 0) + e.depthMm);
   }
   let D = (1 - (opts.startAvailable ?? 0.7)) * taw;
@@ -239,13 +241,14 @@ export function etScaleFor(bed: Bed): number {
 /** One-stop evaluation shared by the UI and the irrigation controller. */
 export function evaluateBed(
   bed: Bed,
-  weather: { daily: DailyWeather[]; today: string },
+  weather: { daily: DailyWeather[]; today: string; utcOffsetSeconds?: number },
   events: IrrigationEvent[],
   reading?: number | null,
 ) {
   const sensorFraction = reading != null && Number.isFinite(reading) ? sensorToFraction(bed, reading) : undefined;
   const sim = simulateWater(bed, weather.daily, events, {
     today: weather.today,
+    utcOffsetSeconds: weather.utcOffsetSeconds,
     etScale: etScaleFor(bed),
     sensor: sensorFraction != null ? { date: weather.today, fraction: sensorFraction } : undefined,
   });

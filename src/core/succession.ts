@@ -233,6 +233,45 @@ export function followOns(bed: Bed, site: Site, pl: BedPlanting, limit = 8): Fol
   return out.sort((a, b) => b.score - a.score).slice(0, limit);
 }
 
+export type SuccessionResult = { ok: true; col: number; row: number; start: Date } | { ok: false; reason: string };
+
+/**
+ * Plan the next succession sowing of a crop: the same crop `successionDays` after the latest
+ * planting in its chain (same crop, bed and season, starting no earlier than `pl`), in the free
+ * square nearest to `pl`. Repeated calls extend the chain.
+ */
+export function nextSuccession(bed: Bed, site: Site, pl: BedPlanting): SuccessionResult {
+  const plant = PLANT_BY_ID[pl.plantId];
+  if (!plant) return { ok: false, reason: 'Unknown crop' };
+  if (plant.perennial) return { ok: false, reason: `${plant.name} is perennial — no successions needed` };
+  const gap = plant.successionDays ?? 14;
+  const first = plantingStart(pl, site);
+  const lastStart = bed.plantings
+    .filter((p) => p.plantId === pl.plantId && p.season === pl.season)
+    .map((p) => plantingStart(p, site))
+    .filter((d) => d >= first)
+    .reduce((a, b) => (b > a ? b : a), first);
+  const earliest = addDays(lastStart, gap);
+  const w = Math.round(bed.widthFt);
+  const h = Math.round(bed.lengthFt);
+  const squares: [number, number][] = [];
+  for (let r = 0; r + plant.span <= h; r++) for (let c = 0; c + plant.span <= w; c++) squares.push([c, r]);
+  squares.sort((a, b) => Math.hypot(a[0] - pl.col, a[1] - pl.row) - Math.hypot(b[0] - pl.col, b[1] - pl.row) || a[1] - b[1] || a[0] - b[0]);
+  let best: { col: number; row: number; start: Date } | null = null;
+  let lastReason = `No square is free for another ${plant.name} sowing`;
+  for (const [c, r] of squares) {
+    const res = scheduleSlot(bed, site, plant, pl.method, c, r, pl.season, { earliest });
+    if (!res.ok) {
+      lastReason = res.reason;
+      continue;
+    }
+    // Close to the intended date wins outright; otherwise remember the earliest fallback.
+    if (res.start.getTime() - earliest.getTime() <= 7 * 86400000) return { ok: true, col: c, row: r, start: res.start };
+    if (!best || res.start < best.start) best = { col: c, row: r, start: res.start };
+  }
+  return best ? { ok: true, ...best } : { ok: false, reason: lastReason };
+}
+
 /** Which season a calendar date belongs to (the season whose spring precedes it). */
 export function seasonOfDate(site: Site, d: Date): number {
   const y = d.getFullYear();
